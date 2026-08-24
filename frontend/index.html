@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UrbanTrace AI — City Traffic Intelligence</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">🛰️</div>
+    <div>
+      <h1>UrbanTrace AI</h1>
+      <p>City-Wide ANPR · Trajectory · Traffic Intelligence</p>
+    </div>
+  </div>
+  <div class="status-strip">
+    <span class="status-chip"><span class="dot" id="dot-db"></span><span id="txt-db">database</span></span>
+    <span class="status-chip"><span class="dot" id="dot-gpu"></span><span id="txt-gpu">compute</span></span>
+    <select class="run-select" id="run-select"><option>loading…</option></select>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-view="overview">Overview</button>
+  <button class="tab" data-view="map">GIS Map</button>
+  <button class="tab" data-view="track">Vehicle Tracking</button>
+  <button class="tab" data-view="analytics">Traffic Analytics</button>
+  <button class="tab" data-view="cameras">Cameras &amp; Video</button>
+  <button class="tab" data-view="alerts">Alerts</button>
+  <button class="tab" data-view="data">Observations</button>
+</nav>
+
+<!-- ============================================ OVERVIEW -->
+<section class="view active" id="view-overview">
+  <div class="tiles" id="tiles"></div>
+  <div class="grid-2">
+    <div class="panel">
+      <div class="panel-head"><h2>Vehicles identified per camera</h2>
+        <span class="hint">distinct plates read</span></div>
+      <div class="panel-body" id="chart-cameras"><div class="loading">loading…</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Route outcomes</h2>
+        <span class="hint">how far each vehicle travelled</span></div>
+      <div class="panel-body" id="chart-status"><div class="loading">loading…</div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Reconstructed vehicle routes</h2>
+      <span class="hint">click a row to open its trajectory</span></div>
+    <div class="panel-body flush table-wrap" id="table-routes"><div class="loading">loading…</div></div>
+  </div>
+</section>
+
+<!-- ============================================ MAP -->
+<section class="view" id="view-map">
+  <div class="panel">
+    <div class="panel-head"><h2>City GIS — cameras, flows and traffic density</h2>
+      <span class="hint" id="map-hint"></span></div>
+    <div class="panel-body flush"><div id="map"></div></div>
+    <div class="map-legend">
+      <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Camera node</span>
+      <span class="legend-item"><span class="swatch line" style="background:var(--series-1)"></span>Vehicle flow (thickness = volume)</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--series-3)"></span>Low density</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--warning)"></span>Moderate</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--critical)"></span>High</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ TRACKING -->
+<section class="view" id="view-track">
+  <div class="note">Query-based trajectory reconstruction. Enter a plate to plot its complete
+    chronological movement history across the camera network, with timestamps, travel times
+    and per-leg plausibility verdicts.</div>
+  <div class="search-row">
+    <input class="search-input" id="plate-input" placeholder="Enter a license plate — e.g. TN09AB1234" autocomplete="off">
+    <button class="btn" id="search-btn">Track vehicle</button>
+  </div>
+  <div class="suggestions" id="plate-suggestions"></div>
+  <div id="track-result"></div>
+</section>
+
+<!-- ============================================ ANALYTICS -->
+<section class="view" id="view-analytics">
+  <div class="tiles" id="analytics-tiles"></div>
+  <div class="panel">
+    <div class="panel-head"><h2>Origin–destination flows</h2>
+      <span class="hint">camera-to-camera vehicle movement</span></div>
+    <div class="panel-body flush table-wrap" id="table-flows"><div class="loading">loading…</div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Unique vehicles counted</h2>
+      <span class="hint">each vehicle counted once by track ID, not per frame</span></div>
+    <div class="panel-body" id="chart-counts"><div class="loading">loading…</div></div>
+  </div>
+  <div class="grid-2">
+    <div class="panel">
+      <div class="panel-head"><h2>Detections over time</h2>
+        <span class="hint">by video timestamp</span></div>
+      <div class="panel-body" id="chart-timeline"><div class="loading">loading…</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Vehicle mix</h2>
+        <span class="hint">detected classes</span></div>
+      <div class="panel-body" id="chart-types"><div class="loading">loading…</div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Processing performance</h2>
+      <span class="hint">measured, per camera</span></div>
+    <div class="panel-body flush table-wrap" id="table-stats"><div class="loading">loading…</div></div>
+  </div>
+</section>
+
+<!-- ============================================ CAMERAS -->
+<section class="view" id="view-cameras">
+  <div class="note">Annotated output from the detection pipeline: orange boxes are tracked
+    vehicles (with ByteTrack ID and recognised plate), green boxes are detected plates.</div>
+  <div class="video-grid" id="video-grid"><div class="loading">loading…</div></div>
+  <div class="panel" style="margin-top:16px">
+    <div class="panel-head"><h2>Camera network</h2><span class="hint">locations and capture windows</span></div>
+    <div class="panel-body flush table-wrap" id="table-cameras"></div>
+  </div>
+</section>
+
+<!-- ============================================ ALERTS -->
+<section class="view" id="view-alerts">
+  <div class="grid-2">
+    <div class="panel">
+      <div class="panel-head"><h2>Active alerts</h2><span class="hint" id="alert-count"></span></div>
+      <div class="panel-body flush" id="alert-list"><div class="loading">loading…</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Watchlist</h2><span class="hint">stored in the database</span></div>
+      <div class="panel-body">
+        <div class="search-row">
+          <input class="search-input" id="wl-input" placeholder="Add plate to watchlist">
+          <button class="btn ghost" id="wl-add">Add</button>
+        </div>
+        <div class="table-wrap" id="table-watchlist"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ DATA -->
+<section class="view" id="view-data">
+  <div class="note">Every plate observation: <strong>plate + timestamp + camera + track ID</strong>.
+    <code>video_time_s</code> is measured from frame index ÷ fps; the wall-clock timestamp is
+    the configured camera start plus that offset.</div>
+  <div class="panel">
+    <div class="panel-head"><h2>Plate observations</h2><span class="hint" id="obs-count"></span></div>
+    <div class="panel-body flush table-wrap" id="table-observations"><div class="loading">loading…</div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Evidence crops</h2><span class="hint">actual plate images extracted from your video</span></div>
+    <div class="panel-body" id="evidence-grid"><div class="loading">loading…</div></div>
+  </div>
+</section>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

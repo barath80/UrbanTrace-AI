@@ -1,0 +1,55 @@
+{
+  "_comment": "Map each video to its real location. Delete entries to fall back to DEFAULT_LOCATIONS. start_time is the configured wall-clock capture start; leave blank to auto-stagger.",
+  "cameras": [
+    {
+      "camera_id": "CAM_01",
+      "video_file": "CAMERA_1.mp4",
+      "name": "Koyambedu Junction",
+      "road": "100 Feet Road / Jawaharlal Nehru Salai",
+      "latitude": 13.0694,
+      "longitude": 80.1948,
+      "direction": "WEST",
+      "start_time": "2026-08-24T10:00:00"
+    },
+    {
+      "camera_id": "CAM_02",
+      "video_file": "CAMERA_2.mp4",
+      "name": "Ambattur Estate",
+      "road": "Chennai-Tiruvallur High Road",
+      "latitude": 13.1143,
+      "longitude": 80.1548,
+      "direction": "WEST",
+      "start_time": "2026-08-24T10:15:48"
+    },
+    {
+      "camera_id": "CAM_03",
+      "video_file": "CAMERA_3.mp4",
+      "name": "Avadi Checkpost",
+      "road": "Chennai-Tiruvallur High Road",
+      "latitude": 13.1147,
+      "longitude": 80.1098,
+      "direction": "WEST",
+      "start_time": "2026-08-24T10:27:24"
+    },
+    {
+      "camera_id": "CAM_04",
+      "video_file": "CAMERA_4.mp4",
+      "name": "Thiruninravur",
+      "road": "Chennai-Tiruvallur High Road",
+      "latitude": 13.118,
+      "longitude": 80.03,
+      "direction": "WEST",
+      "start_time": "2026-08-24T10:48:00"
+    },
+    {
+      "camera_id": "CAM_05",
+      "video_file": "CAMERA_5.mp4",
+      "name": "Tiruvallur Bypass",
+      "road": "NH-716 Tiruvallur Bypass",
+      "latitude": 13.143,
+      "longitude": 79.908,
+      "direction": "WEST",
+      "start_time": "2026-08-24T11:20:12"
+    }
+  ]
+}

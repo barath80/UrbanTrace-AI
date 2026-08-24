@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+data/videos/*.mp4
+data/output/*.mp4
+data/evidence/
+data/urbantrace.db*
+models/weights/*.pt
