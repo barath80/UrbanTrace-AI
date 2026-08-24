@@ -78,6 +78,16 @@ create table if not exists camera_stats (
     processing_fps           double precision,
     ocr_engine_failures      int default 0,
     plate_detector_failures  int default 0,
+    -- Unique vehicles counted: each ByteTrack id counted ONCE, class decided by
+    -- majority vote over the track's lifetime, tracks shorter than
+    -- count_min_frames excluded as detector noise.
+    unique_vehicles          int,
+    count_car                int,
+    count_motorcycle         int,
+    count_bus                int,
+    count_truck              int,
+    count_bicycle            int,
+    count_min_frames         int,
     unique (run_id, camera_id)
 );
 
@@ -232,6 +242,18 @@ select run_id, from_camera, to_camera,
 from route_legs
 where verdict <> 'IMPLAUSIBLE'
 group by run_id, from_camera, to_camera;
+
+-- Unique vehicles counted per camera, by class.
+create or replace view v_vehicle_counts as
+select run_id, camera_id, unique_vehicles,
+       count_car        as car,
+       count_motorcycle as motorcycle,
+       count_bus        as bus,
+       count_truck      as truck,
+       count_bicycle    as bicycle,
+       count_min_frames as min_frames_threshold
+from camera_stats
+order by camera_id;
 
 -- Full trajectory timeline for any plate.
 create or replace view v_plate_timeline as
