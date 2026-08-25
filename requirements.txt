@@ -25,3 +25,6 @@ inference-sdk==1.5.0
 roboflow==1.4.1
 supervision==0.30.0
 huggingface-hub==1.28.0
+
+# Test suite (tests/ runs without a GPU, a video or a network).
+pytest==9.1.1

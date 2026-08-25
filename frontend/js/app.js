@@ -2,7 +2,8 @@
    Every value rendered here comes from the API, which reads Supabase.
    Nothing is generated client-side; empty data renders an explicit empty state. */
 
-const S = { runId: null, cameras: [], vehicles: [], map: null, layers: {}, tmap: null };
+const S = { runId: null, cameras: [], vehicles: [], map: null, layers: {}, tmap: null,
+            paths: {}, flows: [], routeLayer: null, activeRoute: null, mapWired: false };
 
 const C = {
   s1: '#3987e5', s2: '#d95926', s3: '#199e70',
@@ -158,13 +159,29 @@ async function loadOverview() {
 }
 
 /* -------------------------------------------------------------- map */
+/* Routes are drawn along REAL ROADS. Geometry comes from /api/road-route and
+   /api/vehicle-paths, which call GraphHopper server-side - the API key stays on
+   the server and never reaches this file. Where routing was unavailable the
+   backend returns a straight-line estimate and flags it, and the UI labels it,
+   so an estimate is never presented as a measured path. */
+
 async function loadMap() {
   S.cameras = await api('/cameras');
-  const hm = await api('/heatmap');
-  const flows = await api('/flows');
+  const [hm, flows, paths, routing] = await Promise.all([
+    api('/heatmap'), api('/flows'), api('/vehicle-paths'), api('/routing')
+  ]);
+  S.paths = paths || {};
+  S.flows = flows;
+
   document.getElementById('map-hint').textContent =
-    `${S.cameras.length} cameras · ${flows.length} active flows`;
+    `${S.cameras.length} cameras · ${flows.length} flows · ` +
+    `${Object.keys(S.paths).length} reconstructed routes`;
   if (!S.cameras.length) { document.getElementById('map').innerHTML = NO_RUN; return; }
+
+  document.getElementById('routing-status').innerHTML = routing.api_key_configured
+    ? `<span class="prov real">real roads</span> GraphHopper · ${routing.cached_routes} cached`
+    : `<span class="prov est">estimates</span> No GRAPHHOPPER_API_KEY in .env — ` +
+      `paths fall back to straight lines.`;
 
   if (!S.map) {
     S.map = L.map('map', { zoomControl: true });
@@ -173,11 +190,12 @@ async function loadMap() {
   }
   Object.values(S.layers).forEach(l => S.map.removeLayer(l));
   S.layers = {};
+  clearRouteLayer();
 
-  // leaflet.heat draws onto a canvas sized from the container. If it is added
-  // (or redrawn) while the container still has zero width it throws
-  // "getImageData ... source width is 0". Size the map first, then add heat on
-  // the next frame so the canvas has real dimensions.
+  /* ---- heat: density of plate reads per camera ---- */
+  // leaflet.heat sizes its canvas from the container. Building it while the
+  // container is still 0px wide throws "getImageData ... source width is 0",
+  // so size the map first and add the heat layer on the next frame.
   const heatPoints = hm.filter(h => h.observations > 0)
                        .map(h => [h.latitude, h.longitude, h.observations / peakSafe(hm)]);
   S.map.invalidateSize();
@@ -188,26 +206,42 @@ async function loadMap() {
       S.layers.heat = L.heatLayer(heatPoints, {
         radius: 46, blur: 34, minOpacity: .32,
         gradient: { 0.2: C.s3, 0.5: C.warning, 0.8: C.serious, 1: C.critical }
-      }).addTo(S.map);
+      });
+      if (document.getElementById('lyr-heat').checked) S.layers.heat.addTo(S.map);
     } catch (e) { console.warn('heat layer skipped:', e.message); }
   });
 
+  /* ---- corridor flows, along the real road rather than a straight line ---- */
   const maxFlow = Math.max(...flows.map(f => f.vehicles), 1);
   const byId = Object.fromEntries(S.cameras.map(c => [c.camera_id, c]));
-  const flowLayer = L.layerGroup().addTo(S.map);
-  flows.forEach(f => {
+  const flowLayer = L.layerGroup();
+  await Promise.all(flows.map(async f => {
     const a = byId[f.from_camera], b = byId[f.to_camera];
     if (!a || !b) return;
-    L.polyline([[a.latitude, a.longitude], [b.latitude, b.longitude]], {
-      color: C.s1, weight: 2 + 8 * (f.vehicles / maxFlow), opacity: .8
+    let line = [[a.latitude, a.longitude], [b.latitude, b.longitude]];
+    let real = false, km = f.road_distance_km;
+    try {
+      const r = await api(`/road-route?from_camera=${encodeURIComponent(f.from_camera)}` +
+                          `&to_camera=${encodeURIComponent(f.to_camera)}`);
+      if (r.coordinates && r.coordinates.length > 1) line = r.coordinates;
+      real = !!r.is_real_road;
+      km = r.distance_km ?? km;
+    } catch (e) { /* keep the straight line; the badge below says it is one */ }
+    L.polyline(line, {
+      color: C.s1, weight: 2 + 8 * (f.vehicles / maxFlow), opacity: .82,
+      dashArray: real ? null : '7,7'
     }).bindPopup(
-      `<b>${esc(f.from_camera)} → ${esc(f.to_camera)}</b><br>${f.vehicles} vehicle(s)<br>` +
-      `${num(f.road_distance_km, 2)} km · ${num(f.mean_travel_minutes, 1)} min · ` +
-      `${num(f.mean_speed_kmh, 1)} km/h`).addTo(flowLayer);
-  });
+      `<b>${esc(f.from_camera)} → ${esc(f.to_camera)}</b> ` +
+      `<span class="prov ${real ? 'real' : 'est'}">${real ? 'real road' : 'estimate'}</span><br>` +
+      `${f.vehicles} vehicle(s)<br>${num(km, 2)} km · ` +
+      `${num(f.mean_travel_minutes, 1)} min measured · ${num(f.mean_speed_kmh, 1)} km/h`
+    ).addTo(flowLayer);
+  }));
   S.layers.flows = flowLayer;
+  if (document.getElementById('lyr-flows').checked) flowLayer.addTo(S.map);
 
-  const camLayer = L.layerGroup().addTo(S.map);
+  /* ---- camera nodes ---- */
+  const camLayer = L.layerGroup();
   S.cameras.forEach(c => {
     L.circleMarker([c.latitude, c.longitude], {
       radius: 9, color: '#fff', weight: 2, fillColor: C.s1, fillOpacity: .95
@@ -220,9 +254,127 @@ async function loadMap() {
       `location source: ${esc(c.location_source)}`).addTo(camLayer);
   });
   S.layers.cams = camLayer;
+  if (document.getElementById('lyr-cams').checked) camLayer.addTo(S.map);
 
   S.map.fitBounds(L.latLngBounds(S.cameras.map(c => [c.latitude, c.longitude])).pad(0.28));
   setTimeout(() => S.map.invalidateSize(), 80);
+
+  renderRouteList();
+  wireMapControls();
+}
+
+/* ---- the vehicles that have a reconstructed route ---- */
+function renderRouteList(filter = '') {
+  const box = document.getElementById('route-list');
+  const all = Object.values(S.paths).filter(p => p.route.length > 1);
+  const list = all.filter(p =>
+    (p.plate_number || '').toUpperCase().includes(filter.toUpperCase()));
+
+  if (!all.length) {
+    box.innerHTML = `<p class="map-side-note">No multi-camera routes in this run.
+      A route needs the same plate read at two or more cameras.</p>`;
+    return;
+  }
+  if (!list.length) {
+    box.innerHTML = `<p class="map-side-note">No plate matches that filter.</p>`;
+    return;
+  }
+
+  box.innerHTML = list.map(p => `
+    <button class="route-item${S.activeRoute === p.global_vehicle_id ? ' on' : ''}"
+            data-gid="${esc(p.global_vehicle_id)}">
+      <div class="rp">${esc(p.plate_number)}</div>
+      <div class="rr">${esc(p.route.join(' → '))} · ${num(p.road_distance_km, 2)} km${
+        p.is_real_road ? '' : ' · estimated'}</div>
+    </button>`).join('');
+
+  box.querySelectorAll('.route-item').forEach(b =>
+    b.addEventListener('click', () => drawVehicleRoute(b.dataset.gid)));
+}
+
+/* ---- draw one vehicle's road path ---- */
+function drawVehicleRoute(gid) {
+  const p = S.paths[gid];
+  if (!p || !S.map) return;
+  S.activeRoute = gid;
+  clearRouteLayer();
+
+  const layer = L.layerGroup().addTo(S.map);
+  const line = (p.coordinates && p.coordinates.length > 1)
+    ? p.coordinates
+    : p.points.map(pt => [pt.latitude, pt.longitude]);
+
+  // Dark casing under the route so it stays readable over the heat layer.
+  L.polyline(line, { color: '#000', weight: 9, opacity: .45 }).addTo(layer);
+  L.polyline(line, {
+    color: C.s2, weight: 5, opacity: .96,
+    dashArray: p.is_real_road ? null : '9,7'
+  }).addTo(layer);
+
+  // Numbered stops, in the order the cameras actually saw the vehicle.
+  p.points.forEach((pt, i) => {
+    L.marker([pt.latitude, pt.longitude], {
+      icon: L.divIcon({
+        className: '', iconSize: [26, 26], iconAnchor: [13, 13],
+        html: `<div style="width:26px;height:26px;border-radius:50%;background:${C.s2};
+                 color:#fff;border:2px solid #fff;display:flex;align-items:center;
+                 justify-content:center;font:600 12px/1 system-ui;
+                 box-shadow:0 2px 6px rgba(0,0,0,.5)">${i + 1}</div>`
+      })
+    }).bindPopup(
+      `<b>${esc(p.plate_number)}</b> — stop ${i + 1} of ${p.points.length}<br>` +
+      `${esc(pt.camera_id)} · ${esc(pt.name)}`).addTo(layer);
+  });
+
+  S.routeLayer = layer;
+  S.map.fitBounds(L.latLngBounds(line).pad(0.22));
+  renderRouteDetail(p);
+  renderRouteList(document.getElementById('route-filter').value);
+}
+
+function renderRouteDetail(p) {
+  document.getElementById('route-detail').innerHTML = `
+    <div class="route-fact"><span>Plate</span><span>${esc(p.plate_number)}</span></div>
+    <div class="route-fact"><span>Route</span><span>${esc(p.route.join(' → '))}</span></div>
+    <div class="route-fact"><span>Road distance</span><span>${num(p.road_distance_km, 2)} km</span></div>
+    <div class="route-fact"><span>Measured travel</span><span>${num(p.measured_duration_min, 1)} min</span></div>
+    <div class="route-fact"><span>Typical for road</span><span>${num(p.typical_duration_min, 1)} min</span></div>
+    <div class="route-fact"><span>Path source</span><span><span class="prov ${
+      p.is_real_road ? 'real' : 'est'}">${p.is_real_road ? 'real road' : 'estimate'}</span></span></div>
+    <p class="map-side-note" style="margin-top:10px">${esc(p.path_note || '')}</p>`;
+  document.getElementById('route-detail-block').hidden = false;
+}
+
+function clearRouteLayer() {
+  if (S.routeLayer && S.map) { S.map.removeLayer(S.routeLayer); S.routeLayer = null; }
+}
+
+function wireMapControls() {
+  if (S.mapWired) return;
+  S.mapWired = true;
+
+  const toggle = (id, key) => document.getElementById(id).addEventListener('change', e => {
+    const l = S.layers[key];
+    if (!l) return;
+    if (e.target.checked) l.addTo(S.map); else S.map.removeLayer(l);
+  });
+  toggle('lyr-heat', 'heat');
+  toggle('lyr-flows', 'flows');
+  toggle('lyr-cams', 'cams');
+
+  document.getElementById('route-filter').addEventListener('input',
+    e => renderRouteList(e.target.value));
+
+  document.getElementById('route-clear').addEventListener('click', () => {
+    clearRouteLayer();
+    S.activeRoute = null;
+    document.getElementById('route-detail-block').hidden = true;
+    renderRouteList(document.getElementById('route-filter').value);
+    if (S.cameras.length) {
+      S.map.fitBounds(L.latLngBounds(
+        S.cameras.map(c => [c.latitude, c.longitude])).pad(0.28));
+    }
+  });
 }
 
 /* --------------------------------------------------------- tracking */
@@ -253,12 +405,14 @@ window.trackPlate = async function (plate) {
             ${leg ? `<div class="tl-leg">↓ ${num(leg.travel_minutes, 1)} min · ${num(leg.road_distance_km, 2)} km ·
               ${num(leg.implied_speed_kmh, 0)} km/h ${verdictBadge(leg.verdict)}<br>
               <span style="color:var(--ink-muted)">${esc(leg.reason)}</span></div>` : ''}
-            <div class="tl-cam">${esc(t.camera_id)} — ${esc(t.location || '')}</div>
+            <div class="tl-cam">${esc(t.camera_id)} — ${esc(t.location || '')}${
+              t.is_merged_variant ? ` <span class="badge partial" title="OCR read this text here; association merged it into ${esc(d.plate)}">read as ${esc(t.plate_number)}</span>` : ''}</div>
             <div class="tl-meta">${clock(t.observed_at)} · video t=${num(t.video_time_s, 2)}s ·
               track #${t.local_track_id} · conf ${num(t.ocr_confidence, 3)}</div>
             <div class="tl-meta">${num(t.latitude, 4)}, ${num(t.longitude, 4)} · ${esc(t.vehicle_type || '')}</div>
           </div>`; }).join('')}</div></div></div>
-      <div class="panel"><div class="panel-head"><h2>Route on map</h2></div>
+      <div class="panel"><div class="panel-head"><h2>Route on real roads</h2>
+        <span class="hint" id="track-map-hint"></span></div>
         <div class="panel-body flush"><div id="trajectory-map"></div></div></div>
     </div>
     ${d.timeline.some(t => t.evidence_crop) ? `<div class="panel">
@@ -283,17 +437,52 @@ window.trackPlate = async function (plate) {
         <td>${r.repaired ? '<span class="badge partial">repaired</span>' : ''}</td>
       </tr>`).join('')}</tbody></table></div></div>`;
 
+  // The trajectory map draws the REAL ROAD between sightings, fetched from
+  // /api/vehicle-path. Sightings are measured; the road between them is the
+  // route a driver would take, so it is labelled as inferred, not tracked.
+  let path = null;
+  try { path = await api(`/vehicle-path/${encodeURIComponent(d.plate)}`); }
+  catch (e) { /* single-camera vehicle, or routing unavailable */ }
+
   const pts = d.timeline.map(t => [t.latitude, t.longitude]);
+  const line = (path && path.coordinates && path.coordinates.length > 1)
+    ? path.coordinates : pts;
+
   if (S.tmap) { S.tmap.remove(); S.tmap = null; }
   S.tmap = L.map('trajectory-map');
   L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
     { attribution: '© OpenStreetMap © CARTO' }).addTo(S.tmap);
-  if (pts.length > 1) L.polyline(pts, { color: C.s2, weight: 4, opacity: .95 }).addTo(S.tmap);
+
+  if (line.length > 1) {
+    const real = !!(path && path.is_real_road);
+    L.polyline(line, { color: '#000', weight: 8, opacity: .4 }).addTo(S.tmap);
+    L.polyline(line, {
+      color: C.s2, weight: 4.5, opacity: .96, dashArray: real ? null : '9,7'
+    }).bindPopup(
+      `<b>${esc(d.plate)}</b> ` +
+      `<span class="prov ${real ? 'real' : 'est'}">${real ? 'real road' : 'estimate'}</span><br>` +
+      (path ? `${num(path.road_distance_km, 2)} km road · ` +
+              `${num(path.typical_duration_min, 1)} min typical<br>` +
+              `${num(path.measured_duration_min, 1)} min measured` : '')
+    ).addTo(S.tmap);
+  }
+
   d.timeline.forEach((t, i) => L.circleMarker([t.latitude, t.longitude], {
     radius: 8, color: '#fff', weight: 2, fillColor: i === 0 ? C.s3 : C.s2, fillOpacity: .95
   }).bindPopup(`<b>${esc(d.plate)}</b><br>${esc(t.camera_id)} — ${esc(t.location || '')}<br>` +
-    `${clock(t.observed_at)}<br>track #${t.local_track_id} · conf ${num(t.ocr_confidence, 3)}`).addTo(S.tmap));
-  S.tmap.fitBounds(L.latLngBounds(pts).pad(0.35));
+    `${clock(t.observed_at)}<br>track #${t.local_track_id} · conf ${num(t.ocr_confidence, 3)}`
+  ).addTo(S.tmap));
+
+  const hint = document.getElementById('track-map-hint');
+  if (hint) {
+    hint.innerHTML = path
+      ? `<span class="prov ${path.is_real_road ? 'real' : 'est'}">${
+          path.is_real_road ? 'real road' : 'estimate'}</span> ` +
+        `${num(path.road_distance_km, 2)} km · ${esc(path.path_note || '')}`
+      : 'Single camera — no route to draw between sightings.';
+  }
+
+  S.tmap.fitBounds(L.latLngBounds(line).pad(0.28));
   setTimeout(() => S.tmap.invalidateSize(), 90);
 };
 
@@ -383,7 +572,11 @@ async function loadAnalytics() {
           <div style="font-size:12px;color:var(--ink);margin-bottom:6px">
             ${esc(r.camera_id)} — <b>${r.unique_vehicles ?? 0}</b> unique vehicles
             <span style="color:var(--ink-muted);font-size:11px">
-              (each track counted once, min ${r.min_frames_threshold ?? 3} frames)</span></div>
+              (${r.count_mode === 'presence'
+                  ? 'every distinct vehicle seen, parked included'
+                  : 'vehicles that travelled through the scene'}${
+                r.fragments_stitched ? ` · ${r.fragments_stitched} track fragments rejoined` : ''}${
+                r.rejected_as_clutter ? ` · ${r.rejected_as_clutter} rejected as clutter` : ''})</span></div>
           ${classes.filter(k => r[k]).map(k => `
             <div class="bar-row">
               <span class="name">${k}</span>
@@ -428,7 +621,8 @@ async function loadCameras() {
       ${c.has_video ? `<video controls preload="metadata" src="/api/video/${esc(c.camera_id)}"></video>`
                     : `<div class="empty" style="padding:32px">No annotated video on disk for this camera.</div>`}
       <div class="video-foot">
-        <span><b>${c.unique_vehicles ?? 0}</b> unique vehicles</span>
+        <span><b>${c.unique_vehicles ?? 0}</b> unique vehicles${
+          c.count_mode ? ` <span style="color:var(--ink-muted)">(${esc(c.count_mode)})</span>` : ''}</span>
         <span><b>${c.count_car ?? 0}</b> car</span>
         <span><b>${c.count_motorcycle ?? 0}</b> moto</span>
         <span><b>${c.count_bus ?? 0}</b> bus</span>

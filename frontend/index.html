@@ -60,12 +60,46 @@
 <!-- ============================================ MAP -->
 <section class="view" id="view-map">
   <div class="panel">
-    <div class="panel-head"><h2>City GIS — cameras, flows and traffic density</h2>
+    <div class="panel-head"><h2>City GIS — real road routes, cameras and traffic density</h2>
       <span class="hint" id="map-hint"></span></div>
-    <div class="panel-body flush"><div id="map"></div></div>
+    <div class="panel-body flush">
+      <div class="map-shell">
+
+        <aside class="map-side">
+          <div class="map-side-block">
+            <h3>Vehicle route</h3>
+            <p class="map-side-note">Pick a vehicle to draw the road it travelled
+              between the cameras that saw it.</p>
+            <input class="search-input sm" id="route-filter" placeholder="Filter by plate…"
+                   autocomplete="off">
+            <div id="route-list" class="route-list"></div>
+          </div>
+
+          <div class="map-side-block" id="route-detail-block" hidden>
+            <h3>Selected route</h3>
+            <div id="route-detail"></div>
+            <button class="btn ghost sm" id="route-clear">Clear route</button>
+          </div>
+
+          <div class="map-side-block">
+            <h3>Layers</h3>
+            <label class="chk"><input type="checkbox" id="lyr-heat" checked>
+              <span>Traffic density heatmap</span></label>
+            <label class="chk"><input type="checkbox" id="lyr-flows" checked>
+              <span>Corridor flows (real roads)</span></label>
+            <label class="chk"><input type="checkbox" id="lyr-cams" checked>
+              <span>Camera nodes</span></label>
+            <div id="routing-status" class="routing-status"></div>
+          </div>
+        </aside>
+
+        <div id="map"></div>
+      </div>
+    </div>
     <div class="map-legend">
       <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Camera node</span>
-      <span class="legend-item"><span class="swatch line" style="background:var(--series-1)"></span>Vehicle flow (thickness = volume)</span>
+      <span class="legend-item"><span class="swatch line" style="background:var(--series-1)"></span>Corridor flow (thickness = volume)</span>
+      <span class="legend-item"><span class="swatch line" style="background:var(--series-2)"></span>Selected vehicle route</span>
       <span class="legend-item"><span class="swatch" style="background:var(--series-3)"></span>Low density</span>
       <span class="legend-item"><span class="swatch" style="background:var(--warning)"></span>Moderate</span>
       <span class="legend-item"><span class="swatch" style="background:var(--critical)"></span>High</span>

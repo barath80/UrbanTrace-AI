@@ -24,6 +24,10 @@ pipeline stops rather than fabricating output.
 - [Quick start](#quick-start)
 - [Running the notebook](#running-the-notebook)
 - [Running the dashboard](#running-the-dashboard)
+- [Live monitoring](#live-monitoring)
+- [Vehicle counting](#vehicle-counting)
+- [Real-road routing](#real-road-routing)
+- [React dashboard](#react-dashboard)
 - [Camera configuration](#camera-configuration)
 - [Database](#database)
 - [API reference](#api-reference)
@@ -197,7 +201,7 @@ the raw string.
 
 ### 3 · Macro traffic flow analytics
 
-- **Unique vehicle counts by class**, rendered live on the output video and stored per camera
+- **Unique vehicle counts by class**, deduped and auditable — see [Vehicle counting](#vehicle-counting)
 - Per-camera volume and plate-read counts
 - Origin–destination flow matrix with mean travel time and estimated speed
 - Traffic density heatmap on real geography
@@ -230,7 +234,9 @@ All figures below were produced by running this code. Nothing is estimated.
 ```
 vehicle detections      4130
 plate detections         217
-unique vehicles           83   (car 37 · motorcycle 40 · bus 1 · truck 5)
+raw tracker ids          110   ← NOT a vehicle count; see below
+unique vehicles (traffic) 28   (car 10 · motorcycle 16 · truck 2)   ← converged
+unique vehicles (presence) 45   (car 18 · motorcycle 22 · bus 1 · truck 4)  ← approximate
 plates recognised          1   TN01AB1234  @ 0.943 confidence
 frames agreeing        12/14   (agreement 0.857), valid Indian format
 processing speed        18.2   fps on RTX 5060 Laptop GPU
@@ -280,6 +286,7 @@ database persistence. Run with `python scripts/verify_system.py`.
 ### Requirements
 
 - Python 3.12
+- Node.js 18+ (for the React dashboard)
 - NVIDIA GPU with CUDA (CPU works, slower)
 - A Supabase project (or any PostgreSQL with PostGIS)
 
@@ -287,7 +294,31 @@ database persistence. Run with `python scripts/verify_system.py`.
 
 ```bash
 pip install -r requirements.txt
+cd web && npm install && cd ..
 ```
+
+### Run everything
+
+`run.py` checks prerequisites, builds the frontend if needed, processes every
+video in `data/videos/`, persists the run, and serves the dashboard:
+
+```bash
+python run.py
+```
+
+Then open **http://127.0.0.1:8000**.
+
+| Command | Does |
+|---|---|
+| `python run.py` | check → build → process → serve |
+| `python run.py check` | prerequisites only (models, videos, database, routing) |
+| `python run.py process` | process + persist, no server |
+| `python run.py serve` | serve only, using the last saved run |
+| `python run.py build-web` | rebuild the React frontend |
+| `python run.py test` | 33 unit tests + the 55-check self-test |
+
+Add `--no-video` to skip writing annotated output videos (much faster), and
+`--port 8080` to move the server.
 
 ### Configure
 
@@ -396,12 +427,276 @@ python scripts/serve.py           # http://127.0.0.1:8000
 
 ---
 
+## Live monitoring
+
+Batch processing answers "what was in that video". Live ingest answers "what is
+happening now". [`ingest/live.py`](backend/urbantrace/ingest/live.py) runs the
+same vision stack continuously against a source and streams what it finds.
+
+**A source is anything OpenCV can open**, which is what makes this real rather
+than a replay of a stored result:
+
+| Source | Example |
+|---|---|
+| A real ANPR camera | `rtsp://user:pass@10.0.0.7/stream1` |
+| An attached camera | `0`, `1`, `2` … |
+| A video file | played at its own frame rate, so a recording behaves like a feed |
+
+```bash
+python scripts/serve.py        # then open Live Monitor and press Start
+```
+
+```bash
+# or drive it directly
+curl -X POST "localhost:8000/api/live/start?camera_id=CAM_01&detect_every=3"
+curl -X POST "localhost:8000/api/live/start?camera_id=CAM_02&source=rtsp://…"
+curl  -N     "localhost:8000/api/live/stream?camera_id=CAM_01"   # SSE
+curl -X POST "localhost:8000/api/live/stop"
+```
+
+Events arrive over **server-sent events** — one-directional traffic, survives
+proxies, and the browser reconnects on its own:
+
+| Event | Fired when |
+|---|---|
+| `started` / `stopped` / `ended` | session lifecycle |
+| `stats` | twice a second: counts, fps, uptime |
+| `vehicle` | a vehicle passed the counting gates |
+| `plate` | a plate reached **temporal consensus**, with its evidence crop |
+| `alert` | that plate is on the watchlist |
+| `cycle` | a file source replayed, and counting state reset |
+
+### Three things it is honest about
+
+**A plate is published on consensus, not on a glimpse.** A single-frame OCR
+result is exactly what temporal aggregation exists to distrust, so nothing is
+emitted until enough frames agree.
+
+**Throughput is reported against the source.** On an RTX 5060 the full stack
+runs at roughly **17 fps against a 24 fps feed**, so the UI shows a `BEHIND`
+badge and names the lever (`detect_every`). A real camera cannot be slowed
+down, so pretending to keep up would mean silently dropping frames.
+
+**A replayed file resets its counters.** Without that the same vehicles are
+counted again on every pass and the running total climbs without meaning.
+
+Alerts fire live against the same watchlist the batch pipeline uses, and the
+same identity logic — a plate read under a merged OCR variant still matches.
+
+---
+
+## Vehicle counting
+
+**A tracker id is not a vehicle.** Counting distinct ByteTrack ids overcounts
+badly, in three independent ways. On the supplied 10-second clip the tracker
+emits **110 ids** for a scene containing nothing like 110 vehicles:
+
+| Inflation source | What it looks like here |
+|---|---|
+| **Fragmentation** | The tracker loses a vehicle behind the signal pole and re-acquires it under a new id. 110 raw ids collapse to **53** vehicles once fragments are rejoined — **57 stitches**. |
+| **Clutter** | 40×40px far-field blobs and vehicles parked at the kerb. Neither is traffic passing the camera. |
+| **Flicker** | One-to-three frame spurious detections, which get an id like anything else. |
+
+[`counting.py`](backend/urbantrace/vision/counting.py) addresses each:
+
+- **Fragment stitching** — when a new tracker id appears where a recently lost
+  track was predicted to be (constant-velocity, size-compatible, and not alive
+  in the same frame), it is treated as the same vehicle.
+- **Evidence gates** — a track counts if it is *either* big enough to be
+  unambiguous *or* persistent enough that noise cannot explain it. Requiring
+  both discarded a distant motorcycle held for 174 consecutive frames and a
+  truck entering two seconds before the clip ended.
+- **Depth-invariant motion** — pixel displacement scales with 1/depth, so a flat
+  pixel threshold silently drops all far-field traffic. Motion is measured in
+  **body lengths** (displacement ÷ √median box area) instead.
+- **Area-weighted class vote** — the frames where the vehicle was close decide
+  its class, so a distant blob's guess cannot outvote them.
+
+### Two counts, both reported
+
+"How many vehicles" has two honest answers at an intersection where half the
+vehicles in shot are parked, so both are always computed:
+
+| Mode | Means | `camera1.mp4` | Duplicate-free? |
+|---|---|---|---|
+| `traffic` *(default)* | Vehicles that **travelled through** the scene, or crossed the counting line when one is configured | **28** | Yes — converged (see below) |
+| `presence` | Every distinct real vehicle that **appeared**, parked included | **45** | **No — treat as approximate** |
+
+**`traffic` is the trustworthy number; `presence` is not.** A moving vehicle has
+a velocity, so predicting where a lost track should reappear is unambiguous and
+fragments rejoin reliably. Parked vehicles have no velocity, and this scene has
+an autorickshaw stand where several sit clustered, partly behind a pole, at
+~40px. Whether that is two autos or three is genuinely ambiguous from the
+footage. Use `presence` as a rough upper bound, not a figure to quote.
+
+Set a `count_line` for a camera in `cameras.json` and `traffic` becomes
+"vehicles that crossed this line" — the strictest definition, and the one you
+can verify by watching the video.
+
+### Checking the count
+
+A bare number is unverifiable, so the count ships with its evidence:
+
+```bash
+python scripts/cache_tracks.py --all          # detect + track once, cache it
+python scripts/count_vehicles.py --all --sheet --video
+```
+
+| Output | What it is for |
+|---|---|
+| `<video>.sheet.jpg` | **Contact sheet** — one crop per counted vehicle, numbered. Duplicates and false positives are obvious on sight; the count is auditable in about a minute. |
+| `<video>.counts.json` | Every vehicle, its class and frame span, its raw tracker ids — and for each vehicle **not** counted, the exact gate that rejected it. |
+| `<video>.counted.mp4` | Boxes coloured by class, the counting line, and a running total that increments at the frame each vehicle qualifies. Rejected clutter is drawn grey. |
+
+### The duplicate test
+
+Counting is per **vehicle**, never per frame — that part is structural. On this
+clip 28 counted vehicles account for 2991 frame-appearances out of 4130 raw
+detections; the longest-lived vehicle appears in 238 frames and contributes 1.
+
+Whether *fragments* are fully rejoined is the empirical question, and
+`--sensitivity` answers it by re-counting across a 100× range of stitching
+settings. If one vehicle were still counted twice, stitching harder would find
+the join and the total would fall:
+
+```bash
+python scripts/count_vehicles.py --all --sensitivity
+```
+
+```
+  gap   dist | stitched  traffic  presence
+    0  0.055 |        0       25        60
+   30  0.055 |       57       28        45  <- default
+  120   0.15 |       75       27        31
+  TRAFFIC   25-29  CONVERGED - no duplicates left for stitching to merge
+  PRESENCE  31-60  NOT converged - duplicates (or over-merges) remain
+```
+
+`traffic` holds at 25–29 however hard you stitch: it has converged, which is
+what "no duplicate counting" actually means in measurable terms. `presence`
+halves, which is why it is flagged approximate above.
+
+Tracking is cached, so re-counting with different thresholds does not re-run the
+models. Thresholds are all overridable:
+
+```bash
+python scripts/count_vehicles.py --all --mode presence
+python scripts/count_vehicles.py --all --min-frames 12 --min-disp-frac 0.06
+python scripts/count_vehicles.py --all --line 0.0,0.62,1.0,0.55   # count crossings
+```
+
+The counting logic is covered by [`tests/test_counting.py`](tests/test_counting.py)
+(15 tests, no model or video needed) — each test names the real failure it guards
+against, including the two false negatives found while tuning against this clip.
+
+---
+
+## Real-road routing
+
+Camera-to-camera paths are **real driven roads**, not straight lines. Geometry,
+distance and typical driving time come from the
+[GraphHopper Routing API](https://graphhopper.com/), and everything downstream
+uses them: the map, the per-vehicle route, and the travel-time verdicts.
+
+This is a correctness fix, not decoration. Distance used to be great-circle
+× 1.25, and the PLAUSIBLE / FAST / SLOW verdict is computed from it:
+
+| Koyambedu → Ambattur | Distance | Implied speed for a 14.0 min run |
+|---|---|---|
+| Great-circle × 1.25 (old) | 8.26 km | 35 km/h |
+| **Real road (GraphHopper)** | **9.18 km** | **39 km/h** |
+
+### Setup
+
+```bash
+# .env  (git-ignored)
+GRAPHHOPPER_API_KEY=your_graphhopper_key
+```
+
+**The key never reaches the browser.** The frontend asks `/api/road-route` and
+`/api/vehicle-paths`; the server calls GraphHopper. Every response is cached on
+disk under `data/cache/routes/`, keyed by coordinates — cameras do not move, so
+a corridor is fetched once and redraws are free.
+
+### It always returns a route
+
+With no key, no network, or a quota error, routing falls back to the
+great-circle estimate rather than failing. The fallback is **labelled**, end to
+end — `source`, `is_real_road`, a dashed line on the map and an `ESTIMATE`
+badge in the UI — so a guess is never presented as a measured road.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/routing` | Whether a key is configured, and how many routes are cached |
+| `GET /api/road-route?from_camera=&to_camera=` | Road geometry between two cameras |
+| `GET /api/vehicle-paths` | Road path for every vehicle with a multi-camera route |
+| `GET /api/vehicle-path/{plate}` | One vehicle's path, ready to draw |
+
+### What is measured and what is not
+
+A route is a sequence of **sightings**, not a continuous track. What happened
+between two cameras was never observed. The path drawn is the road a driver
+would take, and every response carries that caveat:
+
+> Camera sightings are measured. The road between two sightings is the route a
+> driver would take, from GraphHopper — inferred, not observed.
+
+Run it, and persist so the dashboard picks it up:
+
+```bash
+python scripts/run_all_cameras.py --save
+python scripts/run_all_cameras.py --no-road-routing   # offline, estimates only
+python scripts/serve.py
+```
+
+---
+
+## React dashboard
+
+The dashboard is a Vite + React + TypeScript app in [`web/`](web/), built to
+`web-dist/` and served by FastAPI at the same origin as the API. It is
+**responsive**: one build works on desktop and in a phone browser, where the
+tab rail becomes a thumb-reachable bottom bar.
+
+```bash
+cd web && npm install && npm run build   # -> web-dist/, served at /
+cd .. && python scripts/serve.py         # http://127.0.0.1:8000
+```
+
+For frontend work, `npm run dev` in `web/` proxies `/api` to port 8000.
+The original vanilla-JS dashboard is untouched and still served at `/legacy`.
+
+| Piece | What it does |
+|---|---|
+| **MapLibre GL** | Vector basemap with real tilt and 3D building extrusions, a native GPU heatmap layer, and road geometry drawn as line layers. |
+| **Framer Motion** | View transitions, the sliding tab underline, and count-up statistics. Everything respects `prefers-reduced-motion`. |
+| **Recharts** | Class mix, per-camera counts and the detections-over-time series. |
+
+### Search a plate, get everything
+
+The Vehicle Tracking view is one request to `/api/vehicle-dossier/{plate}`,
+which assembles server-side:
+
+- every **sighting** with timestamp, camera and location
+- the **road path** it travelled, on real roads
+- that vehicle's **own heat surface** — sightings weighted heavily (measured),
+  the road between them weighted low (inferred)
+- **per-leg verdicts** with the real road distance behind each one
+- its **watchlist alerts** and the **raw per-frame OCR** behind every identification
+
+Assembling it server-side is deliberate. When the client stitched these from
+separate endpoints the halves disagreed — the view once reported "2 cameras"
+and "1 sighting" for the same car.
+
+---
+
 ## Camera configuration
 
 Videos contain no GPS and no wall clock, so two things are **configuration**:
 
 1. **Camera coordinates**
 2. **Capture start times**
+3. **The counting line**, if you want counts defined as line crossings
 
 Everything else is measured from the video. Each observation stores
 `video_time_s` (measured: frame index ÷ fps) alongside `observed_at`
@@ -426,11 +721,19 @@ write_config_template()          # → data/cameras.json
       "latitude": 13.0694,
       "longitude": 80.1948,
       "direction": "WEST",
-      "start_time": "2026-08-24T10:00:00"
+      "start_time": "2026-08-24T10:00:00",
+      "count_line": [0.0, 0.62, 1.0, 0.55]
     }
   ]
 }
 ```
+
+`count_line` is `[x1, y1, x2, y2]` in **normalised 0–1 frame coordinates**, so it
+survives a change of resolution. When set, the camera's `traffic` count becomes
+"vehicles whose centre crossed this line" instead of "vehicles that moved".
+Leave it out (or `null`) to count by motion. Draw it across the carriageway you
+want to count and check the result in `<video>.counted.mp4`, which renders the
+line.
 
 Cameras without an entry fall back to a built-in Chennai-corridor pool (Koyambedu →
 Ambattur → Avadi → Thiruninravur → Tiruvallur → Poonamallee → Porur → Guindy →
@@ -523,19 +826,37 @@ UrbanTrace-AI/
 │   │   ├── ocr_engine.py       OCR with cross-variant consensus
 │   │   ├── plate_format.py     Indian plate grammar validation
 │   │   ├── aggregate.py        temporal aggregation
+│   │   ├── counting.py         unique-vehicle counting (dedupe + gates)
 │   │   └── pipeline.py         per-camera pipeline + counter overlay
 │   ├── identity/
 │   │   └── association.py      cross-camera association, routes, validation
+│   ├── alerts/
+│   │   └── engine.py           watchlist matching over vehicle identities
+│   ├── ingest/
+│   │   └── live.py             real-time sessions + SSE event stream
+│   ├── analytics/
+│   │   └── vehicle.py          per-vehicle dossier stats + heat surface
+│   ├── routing/
+│   │   └── graphhopper.py      real road geometry + distance, disk-cached
+│   ├── trajectory/
+│   │   └── paths.py            per-vehicle road path for the map
 │   ├── viz/
 │   │   ├── route_map.py        sketch map, GIS map, heatmap
 │   │   └── video_utils.py      H.264 transcode for browser playback
 │   ├── db/
 │   │   ├── client.py           Supabase connection
 │   │   ├── repository.py       persistence + queries
+│   │   ├── migrations/         additive DDL for existing databases
 │   │   └── schema.sql          DDL
 │   └── api/main.py             FastAPI app
 │
-├── frontend/
+├── web/                        React dashboard (Vite + TS) -> web-dist/
+│   └── src/
+│       ├── api.ts              typed client for every endpoint
+│       ├── components/CityMap.tsx   MapLibre GL 3D map surface
+│       └── views/              one file per dashboard view
+│
+├── frontend/                   legacy vanilla-JS dashboard, served at /legacy
 │   ├── index.html              dashboard, 7 views
 │   ├── css/style.css           validated colour palette
 │   └── js/app.js               data binding, Leaflet, charts
@@ -546,12 +867,22 @@ UrbanTrace-AI/
 │   ├── build_realtime_notebook.py   regenerate the notebook
 │   ├── benchmark_ocr_robustness.py  OCR degradation benchmark
 │   ├── benchmark_temporal_blur.py   temporal aggregation benchmark
+│   ├── cache_tracks.py              cache detection+tracking per video
+│   ├── count_vehicles.py            count + contact sheet + counted video
 │   └── run_all_cameras.py           CLI pipeline runner
+│
+├── tests/
+│   ├── test_counting.py        unique-vehicle counting (no model needed)
+│   ├── test_live.py            live sessions (models stubbed, no GPU)
+│   └── test_routing.py         real-road routing + fallback (no network)
 │
 ├── models/weights/             YOLO weights (downloaded on first use)
 └── data/
     ├── videos/                 ← your input videos
+    ├── cache/tracks/           cached per-frame tracks, for fast re-counting
+    ├── cache/routes/           cached GraphHopper road geometry
     ├── output/                 annotated videos, CSV, JSON, maps
+    ├── output/counts/          per-video counts, contact sheets, counted video
     ├── evidence/               plate crops
     ├── cameras.json            your camera → location mapping
     └── watchlist.txt           plates to alert on
@@ -585,20 +916,21 @@ detection dataset contains plate *boxes* only, no plate *text*. Robustness under
 degradation **is** measured; absolute accuracy is not. **Do not quote a >90%
 accuracy figure until it has been measured on held-out labelled data.**
 
-**Unique vehicle counts are track-based, not ground truth.** The count is sensitive
-to the persistence threshold:
+**Vehicle class labels are wrong for autorickshaws.** The vehicle detector is
+`yolo11m` on COCO, and COCO has no autorickshaw class. On this Chennai footage
+autorickshaws are a large share of traffic, and each one is forced into whichever
+COCO class fits worst-least — they appear scattered across `car`, `truck`, `bus`
+and `motorcycle` in the contact sheet. **The totals are unaffected** (each auto is
+still counted exactly once) but the per-class breakdown is not trustworthy for
+Indian traffic. Fixing it needs a detector fine-tuned with an `autorickshaw`
+class; it is not a threshold change.
 
-| Threshold | Total |
-|---|---|
-| ≥1 frame | 110 |
-| ≥3 frames (default) | 83 |
-| ≥8 frames | 63 |
-| ≥20 frames | 48 |
-
-A vehicle occluded and re-acquired gets a new track ID and is counted twice; parked
-background vehicles are counted as "seen". The honest phrasing is *"83 unique
-tracked vehicles"*, not *"83 vehicles passed"*. A virtual counting line would give a
-stricter, better-defined metric.
+**Counts are auditable, not ground truth.** No human-labelled count exists for
+this footage, so "correct" here means every counted vehicle is a real distinct
+vehicle and no real vehicle passing the camera is missed — checked against the
+contact sheet, not asserted. Thresholds are defaults that suit this scene; a
+camera looking down a motorway would want its own, and `count_line` in
+`cameras.json` is the way to pin the definition down hard.
 
 **Severe motion blur is unrecoverable in a single frame.** Measured: 0% exact
 recovery at blur kernel ≥7 or 3× downscale. The system's answer to blur is

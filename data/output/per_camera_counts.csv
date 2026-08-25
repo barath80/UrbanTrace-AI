@@ -1,0 +1,3 @@
+camera,location,vehicles_tracked,plates_detected,vehicles_with_plate,continued_onward,route_ended_here,frames
+CAM_01,Koyambedu Junction,4130,217,1,1,0,240
+CAM_02,Ambattur Estate,3170,330,4,0,4,240

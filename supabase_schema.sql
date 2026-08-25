@@ -49,6 +49,11 @@ create table if not exists camera_edges (
     expected_min_minutes double precision,
     expected_max_minutes double precision,
     road_segment         text,
+    -- 'graphhopper' = real driven road; 'estimate' = great-circle x 1.25.
+    -- The travel-time verdicts are computed from road_distance_km, so which
+    -- one it is must be stored beside it.
+    distance_source      text default 'estimate',
+    typical_duration_min double precision,
     unique (run_id, source_camera, destination_camera)
 );
 
@@ -78,16 +83,30 @@ create table if not exists camera_stats (
     processing_fps           double precision,
     ocr_engine_failures      int default 0,
     plate_detector_failures  int default 0,
-    -- Unique vehicles counted: each ByteTrack id counted ONCE, class decided by
-    -- majority vote over the track's lifetime, tracks shorter than
-    -- count_min_frames excluded as detector noise.
+    -- Unique vehicles counted. Tracker ids are NOT vehicles: one vehicle
+    -- fragments into several ids when the tracker loses it, so fragments are
+    -- stitched back together and clutter (far-field specks, few-frame flicker)
+    -- is gated out before counting. Class is an area-weighted vote over the
+    -- track, so the frames where the vehicle was close decide it.
+    --
+    -- count_mode says WHICH count unique_vehicles is, and the two differ a lot
+    -- wherever vehicles are parked in shot:
+    --   'traffic'  - vehicles that travelled through the scene (or crossed the
+    --                camera's counting line, when one is configured)
+    --   'presence' - every distinct vehicle that appeared, parked included
+    -- count_traffic/count_presence carry both totals regardless.
     unique_vehicles          int,
+    count_mode               text,
+    count_traffic            int,
+    count_presence           int,
     count_car                int,
     count_motorcycle         int,
     count_bus                int,
     count_truck              int,
     count_bicycle            int,
     count_min_frames         int,
+    count_fragments_stitched int,
+    count_rejected           int,
     unique (run_id, camera_id)
 );
 
@@ -186,6 +205,8 @@ create table if not exists route_legs (
     implied_speed_kmh    double precision,
     expected_min_minutes double precision,
     expected_max_minutes double precision,
+    distance_source      text default 'estimate',
+    typical_duration_min double precision,
     verdict              text,
     reason               text
 );
@@ -243,23 +264,48 @@ from route_legs
 where verdict <> 'IMPLAUSIBLE'
 group by run_id, from_camera, to_camera;
 
--- Unique vehicles counted per camera, by class.
-create or replace view v_vehicle_counts as
-select run_id, camera_id, unique_vehicles,
+-- Unique vehicles counted per camera, by class. Dropped rather than replaced:
+-- CREATE OR REPLACE VIEW cannot rename or reorder existing columns, so an
+-- older database re-running this file would fail on the added columns.
+drop view if exists v_vehicle_counts;
+create view v_vehicle_counts as
+select run_id, camera_id, unique_vehicles, count_mode,
+       count_traffic    as traffic_count,
+       count_presence   as presence_count,
        count_car        as car,
        count_motorcycle as motorcycle,
        count_bus        as bus,
        count_truck      as truck,
        count_bicycle    as bicycle,
-       count_min_frames as min_frames_threshold
+       count_min_frames as min_frames_threshold,
+       count_fragments_stitched as fragments_stitched,
+       count_rejected   as rejected_as_clutter
 from camera_stats
 order by camera_id;
 
 -- Full trajectory timeline for any plate.
-create or replace view v_plate_timeline as
-select o.run_id, o.plate_number, o.observed_at, o.video_time_s,
+drop view if exists v_plate_timeline cascade;
+create view v_plate_timeline as
+select o.run_id, o.observation_id, o.plate_number, o.observed_at, o.video_time_s,
        o.camera_id, c.name as location, c.latitude, c.longitude,
        o.local_track_id, o.ocr_confidence, o.vehicle_type, o.evidence_crop
 from observations o
 left join cameras c on c.run_id = o.run_id and c.camera_id = o.camera_id
 order by o.plate_number, o.observed_at;
+
+-- Every sighting of a VEHICLE, including sightings recorded under a merged OCR
+-- variant of its plate. Matching observations on plate_number alone silently
+-- drops those, which understates the trajectory.
+drop view if exists v_vehicle_timeline;
+create view v_vehicle_timeline as
+select vo.run_id, vo.global_vehicle_id, g.plate_number as vehicle_plate,
+       vo.seq, t.observation_id, t.plate_number, t.observed_at, t.video_time_s,
+       t.camera_id, t.location, t.latitude, t.longitude,
+       t.local_track_id, t.ocr_confidence, t.vehicle_type, t.evidence_crop,
+       (t.plate_number is distinct from g.plate_number) as is_merged_variant
+from vehicle_observations vo
+join global_vehicles g
+  on g.run_id = vo.run_id and g.global_vehicle_id = vo.global_vehicle_id
+join v_plate_timeline t
+  on t.run_id = vo.run_id and t.observation_id = vo.observation_id
+order by g.plate_number, t.observed_at;

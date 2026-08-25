@@ -17,7 +17,7 @@
             <meta name="viewport" content="width=device-width,
                 initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
             <style>
-                #map_92d68d2e26dfcd6cf652642fc5ca96ae {
+                #map_76ea5d44d02a737e1f21cca67ae48065 {
                     position: relative;
                     width: 100.0%;
                     height: 100.0%;
@@ -54,16 +54,16 @@
 <body>
     
     
-            <div class="folium-map" id="map_92d68d2e26dfcd6cf652642fc5ca96ae" ></div>
+            <div class="folium-map" id="map_76ea5d44d02a737e1f21cca67ae48065" ></div>
         
 </body>
 <script>
     
     
-            var map_92d68d2e26dfcd6cf652642fc5ca96ae = L.map(
-                "map_92d68d2e26dfcd6cf652642fc5ca96ae",
+            var map_76ea5d44d02a737e1f21cca67ae48065 = L.map(
+                "map_76ea5d44d02a737e1f21cca67ae48065",
                 {
-                    center: [13.0694, 80.1948],
+                    center: [13.09185, 80.1748],
                     crs: L.CRS.EPSG3857,
                     ...{
   "zoom": 13,
@@ -78,7 +78,7 @@
 
         
     
-            var tile_layer_73e157b2579370ee91ccb6961924d92a = L.tileLayer(
+            var tile_layer_1243ce014e83ae2eb5ab445c09241567 = L.tileLayer(
                 "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
                 {
   "minZoom": 0,
@@ -95,17 +95,95 @@
             );
         
     
-            tile_layer_73e157b2579370ee91ccb6961924d92a.addTo(map_92d68d2e26dfcd6cf652642fc5ca96ae);
+            tile_layer_1243ce014e83ae2eb5ab445c09241567.addTo(map_76ea5d44d02a737e1f21cca67ae48065);
         
     
-            var marker_ecbdad9dff2ef2b26894a14096e3afec = L.marker(
+            var poly_line_62e2cceba7d7de1b77f7ffc9142d9645 = L.polyline(
+                [[13.0694, 80.1948], [13.1143, 80.1548]],
+                {"bubblingMouseEvents": true, "color": "#4da6ff", "dashArray": null, "dashOffset": null, "fill": false, "fillColor": "#4da6ff", "fillOpacity": 0.2, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "noClip": false, "opacity": 0.75, "smoothFactor": 1.0, "stroke": true, "weight": 10.0}
+            ).addTo(map_76ea5d44d02a737e1f21cca67ae48065);
+        
+    
+            poly_line_62e2cceba7d7de1b77f7ffc9142d9645.bindTooltip(
+                `<div>
+                     CAM_01 -> CAM_02: 1 vehicle(s), 8.26 km
+                 </div>`,
+                {
+  "sticky": true,
+}
+            );
+        
+    
+            var poly_line_c8ea5b4d59fdf6d1f1b1ad317718ddb3 = L.polyline(
+                [[13.0694, 80.1948], [13.1143, 80.1548]],
+                {"bubblingMouseEvents": true, "color": "#ff4d4d", "dashArray": null, "dashOffset": null, "fill": false, "fillColor": "#ff4d4d", "fillOpacity": 0.2, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "noClip": false, "opacity": 0.95, "smoothFactor": 1.0, "stroke": true, "weight": 5}
+            ).addTo(map_76ea5d44d02a737e1f21cca67ae48065);
+        
+    
+            poly_line_c8ea5b4d59fdf6d1f1b1ad317718ddb3.bindTooltip(
+                `<div>
+                     TN01AB1234: CAM_01 -> CAM_02
+                 </div>`,
+                {
+  "sticky": true,
+}
+            );
+        
+    
+            var circle_marker_c30c3612da00dd1ef74d89e19f64d936 = L.circleMarker(
+                [13.0694, 80.1948],
+                {"bubblingMouseEvents": true, "color": "#ff4d4d", "dashArray": null, "dashOffset": null, "fill": true, "fillColor": "#ff4d4d", "fillOpacity": 0.9, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "opacity": 1.0, "radius": 7, "stroke": true, "weight": 3}
+            ).addTo(map_76ea5d44d02a737e1f21cca67ae48065);
+        
+    
+        var popup_92d69d9ff7d1dc8e2dc1ed03d0fcf70e = L.popup({
+  "maxWidth": 260,
+});
+
+        
+            
+                var html_d9c02488f128d8b4a74b0436c1c372ff = $(`<div id="html_d9c02488f128d8b4a74b0436c1c372ff" style="width: 100.0%; height: 100.0%;"><b>TN01AB1234</b><br>CAM_01<br>2026-08-24T10:00:01<br>conf 0.94<br>track #22</div>`)[0];
+                popup_92d69d9ff7d1dc8e2dc1ed03d0fcf70e.setContent(html_d9c02488f128d8b4a74b0436c1c372ff);
+            
+        
+
+        circle_marker_c30c3612da00dd1ef74d89e19f64d936.bindPopup(popup_92d69d9ff7d1dc8e2dc1ed03d0fcf70e)
+        ;
+
+        
+    
+    
+            var circle_marker_cf936799e54f3d69cbf6f7f214b82d82 = L.circleMarker(
+                [13.1143, 80.1548],
+                {"bubblingMouseEvents": true, "color": "#ff4d4d", "dashArray": null, "dashOffset": null, "fill": true, "fillColor": "#ff4d4d", "fillOpacity": 0.9, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "opacity": 1.0, "radius": 7, "stroke": true, "weight": 3}
+            ).addTo(map_76ea5d44d02a737e1f21cca67ae48065);
+        
+    
+        var popup_324bdbf9c2c13070f943f82475c2e3f2 = L.popup({
+  "maxWidth": 260,
+});
+
+        
+            
+                var html_742d2a6d04c5d813ab501cf47eababd8 = $(`<div id="html_742d2a6d04c5d813ab501cf47eababd8" style="width: 100.0%; height: 100.0%;"><b>TN01A8123</b><br>CAM_02<br>2026-08-24T10:15:51<br>conf 0.84<br>track #103</div>`)[0];
+                popup_324bdbf9c2c13070f943f82475c2e3f2.setContent(html_742d2a6d04c5d813ab501cf47eababd8);
+            
+        
+
+        circle_marker_cf936799e54f3d69cbf6f7f214b82d82.bindPopup(popup_324bdbf9c2c13070f943f82475c2e3f2)
+        ;
+
+        
+    
+    
+            var marker_7c2caaa1668ebbc763c3ba24deb65822 = L.marker(
                 [13.0694, 80.1948],
                 {
 }
-            ).addTo(map_92d68d2e26dfcd6cf652642fc5ca96ae);
+            ).addTo(map_76ea5d44d02a737e1f21cca67ae48065);
         
     
-            var icon_77a7dbc8480dc84fa8a3655eb90b3ab4 = L.AwesomeMarkers.icon(
+            var icon_bcb6666ffea9228044c4e052dab5282e = L.AwesomeMarkers.icon(
                 {
   "markerColor": "orange",
   "iconColor": "white",
@@ -116,24 +194,24 @@
             );
         
     
-        var popup_4e034177e30ef5ee9492238c9f7193e2 = L.popup({
+        var popup_aa39310ea50670e4d6ab86cc0f528515 = L.popup({
   "maxWidth": 280,
 });
 
         
             
-                var html_5fa703e4d6e2e54ed7efe156e465fd32 = $(`<div id="html_5fa703e4d6e2e54ed7efe156e465fd32" style="width: 100.0%; height: 100.0%;"><b>CAM_01</b><br>Koyambedu Junction<br>100 Feet Road / Jawaharlal Nehru Salai<br>13.0694, 80.1948<br>observations: 1</div>`)[0];
-                popup_4e034177e30ef5ee9492238c9f7193e2.setContent(html_5fa703e4d6e2e54ed7efe156e465fd32);
+                var html_199a067a869f7832c864f65522197acc = $(`<div id="html_199a067a869f7832c864f65522197acc" style="width: 100.0%; height: 100.0%;"><b>CAM_01</b><br>Koyambedu Junction<br>100 Feet Road / Jawaharlal Nehru Salai<br>13.0694, 80.1948<br>observations: 1</div>`)[0];
+                popup_aa39310ea50670e4d6ab86cc0f528515.setContent(html_199a067a869f7832c864f65522197acc);
             
         
 
-        marker_ecbdad9dff2ef2b26894a14096e3afec.bindPopup(popup_4e034177e30ef5ee9492238c9f7193e2)
+        marker_7c2caaa1668ebbc763c3ba24deb65822.bindPopup(popup_aa39310ea50670e4d6ab86cc0f528515)
         ;
 
         
     
     
-            marker_ecbdad9dff2ef2b26894a14096e3afec.bindTooltip(
+            marker_7c2caaa1668ebbc763c3ba24deb65822.bindTooltip(
                 `<div>
                      CAM_01 - Koyambedu Junction
                  </div>`,
@@ -143,7 +221,55 @@
             );
         
     
-                marker_ecbdad9dff2ef2b26894a14096e3afec.setIcon(icon_77a7dbc8480dc84fa8a3655eb90b3ab4);
+                marker_7c2caaa1668ebbc763c3ba24deb65822.setIcon(icon_bcb6666ffea9228044c4e052dab5282e);
+            
+    
+            var marker_f8e47172b7e34cda5259afefbbcac85a = L.marker(
+                [13.1143, 80.1548],
+                {
+}
+            ).addTo(map_76ea5d44d02a737e1f21cca67ae48065);
+        
+    
+            var icon_efb329b3c16d1fe953ac0fe8736fc0ca = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "orange",
+  "iconColor": "white",
+  "icon": "video-camera",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_26cf445a89ec90fea20c48c8f162dabb = L.popup({
+  "maxWidth": 280,
+});
+
+        
+            
+                var html_7bed5cf3005865f54a2997b5284f492b = $(`<div id="html_7bed5cf3005865f54a2997b5284f492b" style="width: 100.0%; height: 100.0%;"><b>CAM_02</b><br>Ambattur Estate<br>Chennai-Tiruvallur High Road<br>13.1143, 80.1548<br>observations: 4</div>`)[0];
+                popup_26cf445a89ec90fea20c48c8f162dabb.setContent(html_7bed5cf3005865f54a2997b5284f492b);
+            
+        
+
+        marker_f8e47172b7e34cda5259afefbbcac85a.bindPopup(popup_26cf445a89ec90fea20c48c8f162dabb)
+        ;
+
+        
+    
+    
+            marker_f8e47172b7e34cda5259afefbbcac85a.bindTooltip(
+                `<div>
+                     CAM_02 - Ambattur Estate
+                 </div>`,
+                {
+  "sticky": true,
+}
+            );
+        
+    
+                marker_f8e47172b7e34cda5259afefbbcac85a.setIcon(icon_efb329b3c16d1fe953ac0fe8736fc0ca);
             
 </script>
 </html>

@@ -69,6 +69,13 @@ class Leg:
     expected_max_minutes: float
     verdict: str          # PLAUSIBLE | SLOW | FAST | IMPLAUSIBLE | UNKNOWN_EDGE
     reason: str
+    # Whether road_distance_km is the real driven road (GraphHopper) or a
+    # great-circle estimate. The verdict rests on this distance, so the UI
+    # must be able to say which it was.
+    distance_source: str = "estimate"
+    # GraphHopper's typical driving time for this road, when known - a
+    # reference point next to the measured travel_minutes.
+    typical_duration_min: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -110,10 +117,13 @@ def validate_transition(a: dict, b: dict) -> Leg:
     if edge is None:
         return Leg(a["camera_id"], b["camera_id"], a["timestamp"], b["timestamp"],
                    round(minutes, 2), 0.0, 0.0, 0.0, 0.0, "UNKNOWN_EDGE",
-                   f"No configured road link between {a['camera_id']} and {b['camera_id']}.")
+                   f"No configured road link between {a['camera_id']} and {b['camera_id']}.",
+                   distance_source="none")
 
     dist = edge.road_distance_km
     speed = (dist / (minutes / 60.0)) if minutes > 0 else float("inf")
+    road = ("real road distance" if edge.distance_source == "graphhopper"
+            else "estimated distance")
 
     if minutes <= 0:
         verdict = "IMPLAUSIBLE"
@@ -134,12 +144,15 @@ def validate_transition(a: dict, b: dict) -> Leg:
                   f"congestion or an intermediate stop.")
     else:
         verdict = "PLAUSIBLE"
-        reason = (f"{dist:.2f} km in {minutes:.1f} min ({speed:.0f} km/h), within the "
-                  f"expected {edge.expected_min_minutes:.1f}-{edge.expected_max_minutes:.1f} min window.")
+        reason = (f"{dist:.2f} km ({road}) in {minutes:.1f} min ({speed:.0f} km/h), "
+                  f"within the expected {edge.expected_min_minutes:.1f}-"
+                  f"{edge.expected_max_minutes:.1f} min window.")
 
     return Leg(a["camera_id"], b["camera_id"], a["timestamp"], b["timestamp"],
                round(minutes, 2), dist, round(speed, 1),
-               edge.expected_min_minutes, edge.expected_max_minutes, verdict, reason)
+               edge.expected_min_minutes, edge.expected_max_minutes, verdict, reason,
+               distance_source=edge.distance_source,
+               typical_duration_min=edge.typical_duration_min)
 
 
 def _merge_similar_plates(plates: list, observations_by_plate: dict) -> dict:

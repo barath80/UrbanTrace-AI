@@ -206,7 +206,7 @@ WRITE_VIDEO = True     # annotated mp4 with vehicle + plate boxes, track IDs, pl
 OUT_DIR      = ROOT / "data" / "output";   OUT_DIR.mkdir(parents=True, exist_ok=True)
 EVIDENCE_DIR = ROOT / "data" / "evidence"; EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
 
-all_observations, camera_stats = [], {}
+all_observations, camera_stats, counted_vehicles = [], {}, {}
 
 for cam_id, path in videos.items():
     pipe = CameraPipeline(
@@ -216,6 +216,7 @@ for cam_id, path in videos.items():
     obs = pipe.run(max_frames=MAX_FRAMES, progress_every=100)
     all_observations.extend(obs)
     camera_stats[cam_id] = pipe.stats
+    counted_vehicles[cam_id] = pipe.counted_vehicles
     print(f"[{cam_id}] {len(obs)} plate observations\\n")
 
 print("=" * 70)
@@ -227,10 +228,55 @@ if not all_observations:
 
 cells.append(md("### 5a. Processing statistics (measured)"))
 cells.append(code("""
-st = pd.DataFrame(camera_stats).T
+# count_report is a nested dict; it gets its own table in 5b.
+st = pd.DataFrame({k: {kk: vv for kk, vv in v.items() if kk != "count_report"}
+                   for k, v in camera_stats.items()}).T
 st["plates_per_frame"] = (st["plate_dets"] / st["frames"]).round(3)
 st["ocr_success_rate"] = (st["ocr_success"] / st["ocr_calls"].replace(0, 1)).round(3)
 display(st)
+"""))
+
+cells.append(md("""### 5b. Unique vehicle counts (measured)
+
+**A tracker id is not a vehicle.** One vehicle fragments into several tracker
+ids whenever the tracker loses it behind an occluder, and the detector also
+fires on kerbside-parked vehicles and on far-field specks. `vision/counting.py`
+stitches fragments back together and gates out clutter before counting.
+
+Two counts are reported, because both are honest answers to different questions:
+
+- **traffic** — vehicles that *travelled through* the scene (or crossed the
+  camera's `count_line`, if one is set in `cameras.json`)
+- **presence** — every distinct vehicle that *appeared*, parked included"""))
+cells.append(code("""
+rows = []
+for cam, s in camera_stats.items():
+    rep = s.get("count_report", {})
+    rows.append({
+        "camera": cam,
+        "raw_tracker_ids": rep.get("raw_tracker_ids"),
+        "fragments_stitched": rep.get("fragments_stitched"),
+        "rejected_as_clutter": rep.get("rejected"),
+        "traffic": rep.get("traffic", {}).get("total"),
+        "presence": rep.get("presence", {}).get("total"),
+        "headline_mode": s.get("count_mode"),
+        "unique_vehicles": s.get("unique_vehicles"),
+    })
+display(pd.DataFrame(rows).set_index("camera"))
+
+# Every counted vehicle - and for each one NOT counted, the gate that rejected
+# it. A total you cannot audit is a total you cannot trust.
+cv = pd.DataFrame([{**v, "camera": cam}
+                   for cam, vs in counted_vehicles.items() for v in vs])
+if not cv.empty:
+    print("Rejected as clutter or flicker, and why:")
+    display(cv[~cv.counted_presence][
+        ["camera", "vehicle_id", "vehicle_type", "frames_seen",
+         "median_area_px", "reject_reason"]])
+    print("Counted as traffic:")
+    display(cv[cv.counted_traffic][
+        ["camera", "vehicle_id", "vehicle_type", "first_frame", "last_frame",
+         "frames_seen", "displacement_px", "raw_track_ids"]])
 """))
 
 # ---------------------------------------------------------------- 6

@@ -65,6 +65,10 @@ class Camera:
     video_file: str
     start_time: str = ""          # ISO capture start (configured, not measured)
     location_source: str = "default"   # "config" | "default"
+    # Optional counting line for this camera, [x1, y1, x2, y2] in NORMALISED
+    # 0..1 frame coords. When set, the traffic count is "vehicles that crossed
+    # this line" - the definition you can verify by watching the video.
+    count_line: tuple | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -78,6 +82,14 @@ class CameraEdge:
     expected_min_minutes: float
     expected_max_minutes: float
     road_segment: str
+    # How road_distance_km was obtained. "estimate" is great-circle x 1.25;
+    # "graphhopper" is the real driven road. The travel-time verdicts depend on
+    # this number, so which one it is must never be silent.
+    distance_source: str = "estimate"
+    # GraphHopper's own duration for the road route, when known. This is a
+    # reference value, NOT the acceptance window - the window stays a speed
+    # band so it is explainable without a third party.
+    typical_duration_min: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -164,11 +176,13 @@ def load_network(video_dir: Path | None = None,
             name, road, lat, lon, direction = d
             src = "default"
 
+        cl = entry.get("count_line")
         CAMERAS[cam_id] = Camera(
             camera_id=cam_id, name=name, road=road,
             latitude=lat, longitude=lon, direction=direction,
             video_file=vid.name, start_time=entry.get("start_time", ""),
-            location_source=src)
+            location_source=src,
+            count_line=tuple(float(v) for v in cl) if cl else None)
         CAMERA_ORDER.append(cam_id)
 
     _build_edges()
@@ -219,13 +233,55 @@ def _assign_start_times(base: datetime, stagger_minutes: float | None) -> None:
         CAMERAS[cam_id] = Camera(**{**cam.to_dict(), "start_time": t.isoformat()})
 
 
+def enrich_edges_with_real_roads(profile: str = "car", verbose: bool = True) -> dict:
+    """Replace estimated edge distances with real road distances.
+
+    Called explicitly, never on import: it touches the network. Results are
+    cached on disk by the routing module, so repeat runs are free and offline
+    runs fall back to the estimate rather than failing.
+
+    Returns a summary of what was upgraded and what stayed an estimate.
+    """
+    from ..routing import road_route
+
+    upgraded, estimated = 0, 0
+    for i, e in enumerate(CAMERA_EDGES):
+        a, b = CAMERAS[e.source], CAMERAS[e.destination]
+        r = road_route(a.latitude, a.longitude, b.latitude, b.longitude,
+                       profile=profile)
+        if not r.is_real_road:
+            estimated += 1
+            if verbose:
+                print(f"  {e.source}->{e.destination}: kept estimate ({r.error})")
+            continue
+        km = max(0.01, r.distance_km)
+        new = CameraEdge(
+            source=e.source, destination=e.destination, road_distance_km=km,
+            expected_min_minutes=round(km / FREEFLOW_KMH * 60, 1),
+            expected_max_minutes=round(km / CONGESTED_KMH * 60, 1),
+            road_segment=e.road_segment,
+            distance_source="graphhopper",
+            typical_duration_min=r.duration_min)
+        CAMERA_EDGES[i] = new
+        EDGE_INDEX[(new.source, new.destination)] = new
+        upgraded += 1
+        if verbose:
+            print(f"  {e.source}->{e.destination}: {e.road_distance_km:.2f} km "
+                  f"(estimated) -> {km:.2f} km (real road, "
+                  f"{r.duration_min:.0f} min typical)")
+
+    return {"edges": len(CAMERA_EDGES), "real_road": upgraded,
+            "estimated": estimated, "profile": profile}
+
+
 def get_edge(src: str, dst: str):
     if (src, dst) in EDGE_INDEX:
         return EDGE_INDEX[(src, dst)]
     rev = EDGE_INDEX.get((dst, src))
     if rev is not None:
         return CameraEdge(src, dst, rev.road_distance_km, rev.expected_min_minutes,
-                          rev.expected_max_minutes, rev.road_segment + " (reverse)")
+                          rev.expected_max_minutes, rev.road_segment + " (reverse)",
+                          rev.distance_source, rev.typical_duration_min)
     return None
 
 
@@ -246,11 +302,15 @@ def write_config_template(path: Path | None = None) -> Path:
     payload = {
         "_comment": ("Map each video to its real location. Delete entries to fall "
                      "back to DEFAULT_LOCATIONS. start_time is the configured "
-                     "wall-clock capture start; leave blank to auto-stagger."),
+                     "wall-clock capture start; leave blank to auto-stagger. "
+                     "count_line is [x1,y1,x2,y2] in 0..1 frame coords; set it "
+                     "to count vehicles that CROSS the line rather than "
+                     "vehicles that move, and leave it null to use motion."),
         "cameras": [{"camera_id": c.camera_id, "video_file": c.video_file,
                      "name": c.name, "road": c.road,
                      "latitude": c.latitude, "longitude": c.longitude,
-                     "direction": c.direction, "start_time": c.start_time}
+                     "direction": c.direction, "start_time": c.start_time,
+                     "count_line": list(c.count_line) if c.count_line else None}
                     for c in CAMERAS.values()],
     }
     path.write_text(json.dumps(payload, indent=2))

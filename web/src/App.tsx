@@ -1,0 +1,117 @@
+import { AnimatePresence, motion } from 'framer-motion'
+import { useCallback, useEffect, useState } from 'react'
+
+import { getHealth, getSummary, type Health } from './api'
+import Alerts from './views/Alerts'
+import Analytics from './views/Analytics'
+import Cameras from './views/Cameras'
+import GisMap from './views/GisMap'
+import Live from './views/Live'
+import Observations from './views/Observations'
+import Overview from './views/Overview'
+import TrackVehicle from './views/TrackVehicle'
+
+type ViewId = 'overview' | 'live' | 'map' | 'track' | 'analytics' | 'cameras' | 'alerts' | 'data'
+
+const TABS: { id: ViewId; label: string; short: string }[] = [
+  { id: 'overview', label: 'Overview', short: 'Home' },
+  { id: 'live', label: 'Live Monitor', short: 'Live' },
+  { id: 'map', label: 'GIS Map', short: 'Map' },
+  { id: 'track', label: 'Vehicle Tracking', short: 'Track' },
+  { id: 'analytics', label: 'Traffic Analytics', short: 'Stats' },
+  { id: 'cameras', label: 'Cameras & Video', short: 'Cams' },
+  { id: 'alerts', label: 'Alerts', short: 'Alerts' },
+  { id: 'data', label: 'Observations', short: 'Data' },
+]
+
+export default function App() {
+  const [view, setView] = useState<ViewId>('overview')
+  const [health, setHealth] = useState<Health | null>(null)
+  const [alertCount, setAlertCount] = useState(0)
+  const [plate, setPlate] = useState<string | undefined>()
+
+  useEffect(() => {
+    getHealth().then(setHealth).catch(() => setHealth(null))
+    getSummary().then(s => setAlertCount(Number(s.alerts) || 0)).catch(() => setAlertCount(0))
+  }, [])
+
+  /** Jump straight to a vehicle's dossier from anywhere a plate is shown. */
+  const track = useCallback((p: string) => {
+    setPlate(p)
+    setView('track')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [])
+
+  const db = health?.database
+  const rt = health?.runtime
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">◉</div>
+          <div>
+            <h1>UrbanTrace AI</h1>
+            <p>City-wide ANPR · Trajectory · Traffic Intelligence</p>
+          </div>
+        </div>
+        <div className="chips">
+          {/* Shown only when connected. Each view already reports its own
+              empty state, so a persistent offline banner adds nothing.
+              /api/health still carries the real status. */}
+          {db?.connected && (
+            <span className="chip">
+              <span className="dot ok" />
+              Supabase · {db.public_tables ?? '?'} tables
+            </span>
+          )}
+          <span className="chip hide-sm">
+            <span className={`dot ${rt?.cuda ? 'ok' : ''}`} />
+            {rt?.gpu_name ?? rt?.device ?? '—'}
+          </span>
+        </div>
+      </header>
+
+      <nav className="tabs">
+        {TABS.map(t => (
+          <button
+            key={t.id}
+            className={`tab${view === t.id ? ' on' : ''}`}
+            onClick={() => setView(t.id)}
+          >
+            <span className="tab-full">{t.label}</span>
+            <span className="tab-short">{t.short}</span>
+            {t.id === 'alerts' && alertCount > 0 && (
+              <span className="badge-n">{alertCount}</span>
+            )}
+            {view === t.id && (
+              <motion.span className="tab-underline" layoutId="tab-underline"
+                           transition={{ type: 'spring', stiffness: 420, damping: 34 }} />
+            )}
+          </button>
+        ))}
+      </nav>
+
+      <main>
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={view}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.22, ease: 'easeOut' }}
+          >
+            {view === 'overview' && <Overview onTrack={track} />}
+            {view === 'live' && <Live onTrack={track} />}
+            {view === 'map' && <GisMap onTrack={track} />}
+            {view === 'track' && <TrackVehicle initialPlate={plate} />}
+            {view === 'analytics' && <Analytics />}
+            {view === 'cameras' && <Cameras />}
+            {view === 'alerts' && <Alerts onTrack={track} />}
+            {view === 'data' && <Observations onTrack={track} />}
+          </motion.div>
+        </AnimatePresence>
+      </main>
+    </div>
+  )
+}

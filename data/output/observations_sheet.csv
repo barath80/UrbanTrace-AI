@@ -1,0 +1,6 @@
+observation_id,camera_id,local_track_id,plate_number,timestamp,video_time_s,frame_number,vehicle_type,ocr_confidence,plate_detection_confidence,support,total_readings,agreement,is_valid_format
+OBS_CAM_01_0022,CAM_01,22,TN01AB1234,2026-08-24T10:00:01,1.042,25,car,0.9429,0.7976,12,14,0.857,True
+OBS_CAM_02_0007,CAM_02,7,11155,2026-08-24T10:15:48,0.75,18,truck,0.64,0.3138,1,1,1.0,False
+OBS_CAM_02_0004,CAM_02,4,IEV70M,2026-08-24T10:15:49,1.792,43,motorcycle,0.4835,0.4979,1,2,0.5,False
+OBS_CAM_02_0005,CAM_02,5,61A4944,2026-08-24T10:15:50,2.833,68,truck,0.2797,0.6497,1,14,0.071,False
+OBS_CAM_02_0103,CAM_02,103,TN01A8123,2026-08-24T10:15:51,3.875,93,car,0.8436,0.7599,2,14,0.143,True

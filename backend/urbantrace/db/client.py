@@ -12,6 +12,7 @@ source. Two gotchas this module handles for you:
 from __future__ import annotations
 
 import os
+import threading
 import urllib.parse as up
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -99,19 +100,82 @@ def connect(timeout: int = 20):
     ) from last
 
 
+# ---------------------------------------------------------- pooling
+# Supabase lives in ap-south-1 and every connection costs a TCP + TLS
+# handshake. Opening one per query made a single dashboard request that runs
+# seven queries take six seconds, nearly all of it handshaking. Connections are
+# therefore pooled per process and reused.
+
+_POOL = None
+_POOL_LOCK = threading.Lock()
+POOL_MIN, POOL_MAX = 1, 8
+
+
+def _pool():
+    global _POOL
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                from psycopg2.pool import ThreadedConnectionPool
+                cfg = get_config()
+                order = [cfg.dsn()] + [d for d in (cfg.pooler_dsn, cfg.direct_dsn)
+                                       if d != cfg.dsn()]
+                last = None
+                for dsn in order:
+                    try:
+                        _POOL = ThreadedConnectionPool(
+                            POOL_MIN, POOL_MAX, dsn,
+                            connect_timeout=20, sslmode="require")
+                        break
+                    except Exception as e:
+                        last = e
+                if _POOL is None:
+                    raise ConnectionError(
+                        f"Could not reach Supabase. Last error: "
+                        f"{type(last).__name__}: {last}") from last
+    return _POOL
+
+
 @contextmanager
-def cursor(commit: bool = True):
-    conn = connect()
+def pooled(commit: bool = True):
+    """A pooled connection. Broken connections are discarded, not returned."""
+    pool = _pool()
+    conn = pool.getconn()
+    bad = False
     try:
-        with conn.cursor() as cur:
-            yield cur
+        yield conn
         if commit:
             conn.commit()
     except Exception:
-        conn.rollback()
+        bad = True
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        try:
+            pool.putconn(conn, close=bad)
+        except Exception:
+            pass
+
+
+def close_pool() -> None:
+    """Drop every pooled connection. Used by tests and on shutdown."""
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is not None:
+            try:
+                _POOL.closeall()
+            finally:
+                _POOL = None
+
+
+@contextmanager
+def cursor(commit: bool = True):
+    with pooled(commit=commit) as conn:
+        with conn.cursor() as cur:
+            yield cur
 
 
 def ping() -> dict:

@@ -12,7 +12,7 @@ from datetime import datetime
 
 from psycopg2.extras import execute_values, RealDictCursor
 
-from .client import connect, cursor
+from .client import cursor, pooled
 
 # ------------------------------------------------------------------ runs
 
@@ -64,14 +64,17 @@ def save_cameras(run_id: str, cameras: dict) -> int:
 
 def save_edges(run_id: str, edges: list) -> int:
     rows = [(run_id, e.source, e.destination, e.road_distance_km,
-             e.expected_min_minutes, e.expected_max_minutes, e.road_segment)
+             e.expected_min_minutes, e.expected_max_minutes, e.road_segment,
+             getattr(e, "distance_source", "estimate"),
+             getattr(e, "typical_duration_min", None))
             for e in edges]
     if not rows:
         return 0
     with cursor() as cur:
         execute_values(cur,
             """insert into camera_edges (run_id, source_camera, destination_camera,
-                    road_distance_km, expected_min_minutes, expected_max_minutes, road_segment)
+                    road_distance_km, expected_min_minutes, expected_max_minutes,
+                    road_segment, distance_source, typical_duration_min)
                values %s on conflict (run_id, source_camera, destination_camera) do nothing""",
             rows)
     return len(rows)
@@ -101,13 +104,19 @@ def save_camera_stats(run_id: str, stats: dict) -> int:
     rows = []
     for cam, s in stats.items():
         c = s.get("counts_by_class", {}) or {}
+        rep = s.get("count_report", {}) or {}
+        cfg = rep.get("config", {}) or {}
         rows.append((run_id, cam, s.get("frames"), s.get("vehicle_dets"),
                      s.get("plate_dets"), s.get("ocr_calls"), s.get("ocr_success"),
                      s.get("wall_seconds"), s.get("processing_fps"),
                      s.get("ocr_engine_failures", 0), s.get("plate_detector_failures", 0),
-                     s.get("unique_vehicles"), c.get("car"), c.get("motorcycle"),
+                     s.get("unique_vehicles"), s.get("count_mode"),
+                     (rep.get("traffic") or {}).get("total"),
+                     (rep.get("presence") or {}).get("total"),
+                     c.get("car"), c.get("motorcycle"),
                      c.get("bus"), c.get("truck"), c.get("bicycle"),
-                     s.get("count_min_frames")))
+                     cfg.get("min_frames"), rep.get("fragments_stitched"),
+                     rep.get("rejected")))
     if not rows:
         return 0
     with cursor() as cur:
@@ -115,8 +124,10 @@ def save_camera_stats(run_id: str, stats: dict) -> int:
             """insert into camera_stats (run_id, camera_id, frames, vehicle_dets,
                     plate_dets, ocr_calls, ocr_success, wall_seconds, processing_fps,
                     ocr_engine_failures, plate_detector_failures,
-                    unique_vehicles, count_car, count_motorcycle, count_bus,
-                    count_truck, count_bicycle, count_min_frames)
+                    unique_vehicles, count_mode, count_traffic, count_presence,
+                    count_car, count_motorcycle, count_bus,
+                    count_truck, count_bicycle, count_min_frames,
+                    count_fragments_stitched, count_rejected)
                values %s on conflict (run_id, camera_id) do nothing""", rows)
     return len(rows)
 
@@ -191,6 +202,7 @@ def save_global_vehicles(run_id: str, vehicles: list) -> tuple:
                 l.get("departed") or None, l.get("arrived") or None, l.get("travel_minutes"),
                 l.get("road_distance_km"), l.get("implied_speed_kmh"),
                 l.get("expected_min_minutes"), l.get("expected_max_minutes"),
+                l.get("distance_source", "estimate"), l.get("typical_duration_min"),
                 l.get("verdict"), l.get("reason")))
         for i, o in enumerate(v.get("observations", [])):
             link_rows.append((run_id, v["global_vehicle_id"], o["observation_id"], i))
@@ -206,6 +218,7 @@ def save_global_vehicles(run_id: str, vehicles: list) -> tuple:
                 """insert into route_legs (run_id, global_vehicle_id, leg_index, from_camera,
                       to_camera, departed, arrived, travel_minutes, road_distance_km,
                       implied_speed_kmh, expected_min_minutes, expected_max_minutes,
+                      distance_source, typical_duration_min,
                       verdict, reason) values %s""", leg_rows)
         if link_rows:
             execute_values(cur,
@@ -249,13 +262,12 @@ def add_to_watchlist(plate: str, note: str = "") -> None:
 
 
 def _fetch(sql: str, params=()) -> list:
-    conn = connect()
-    try:
+    # Pooled: a read-only dashboard request runs several of these, and paying a
+    # TLS handshake for each one dominated the response time.
+    with pooled(commit=False) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
 
 
 def latest_run() -> str | None:
@@ -264,12 +276,32 @@ def latest_run() -> str | None:
 
 
 def plate_timeline(plate: str, run_id: str | None = None) -> list:
-    """Every sighting of a plate, chronologically - the query-based tracking interface."""
+    """Every sighting of a vehicle, chronologically.
+
+    Resolved through the GLOBAL VEHICLE, not the plate string. Association
+    merges OCR variants - TN01AB1234 and TN01A8123 are one car - and the
+    sighting at the second camera is stored under whichever text was read
+    there. Matching observations on plate_number alone drops it, which is how
+    a two-camera vehicle came to show "1 sighting" on a two-stop route.
+
+    Falls back to the plate string for observations never linked to a vehicle.
+    """
+    plate = plate.upper()
     if run_id:
-        return _fetch("select * from v_plate_timeline where plate_number = %s "
-                      "and run_id = %s order by observed_at", (plate.upper(), run_id))
+        rows = _fetch("""select * from v_vehicle_timeline
+                         where vehicle_plate = %s and run_id = %s
+                         order by observed_at""", (plate, run_id))
+        if rows:
+            return rows
+        return _fetch("""select * from v_plate_timeline
+                         where plate_number = %s and run_id = %s
+                         order by observed_at""", (plate, run_id))
+    rows = _fetch("""select * from v_vehicle_timeline where vehicle_plate = %s
+                     order by observed_at""", (plate,))
+    if rows:
+        return rows
     return _fetch("select * from v_plate_timeline where plate_number = %s "
-                  "order by observed_at", (plate.upper(),))
+                  "order by observed_at", (plate,))
 
 
 def camera_counts(run_id: str) -> list:

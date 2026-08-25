@@ -22,6 +22,7 @@ import numpy as np
 
 from ..core.cameras import CAMERAS
 from .aggregate import Reading, aggregate
+from .counting import COUNT_CLASSES, CountConfig, VehicleCounter
 from .detectors import PlateDetector, VehicleTracker, bind_plates_to_tracks
 from .ocr_engine import get_ocr
 from .preprocess import crop_with_margin
@@ -30,13 +31,11 @@ from .preprocess import crop_with_margin
 MAX_READINGS_PER_TRACK = 14
 MIN_PLATE_PIXELS = 480          # w*h below this the crop cannot carry 10 glyphs
 
-# A track must persist this many frames before it is counted. ByteTrack can emit
-# a short-lived id for a spurious detection; requiring persistence stops those
-# inflating the totals.
-MIN_FRAMES_TO_COUNT = 3
+# Which count the on-video overlay shows. "traffic" = vehicles that travel
+# through the scene; "presence" = every distinct vehicle that appears, parked
+# included. Both are computed either way and both land in stats.
+DEFAULT_COUNT_MODE = "traffic"
 
-# Classes shown in the on-video counter, in display order.
-COUNT_CLASSES = ("car", "motorcycle", "bus", "truck", "bicycle")
 COUNT_COLORS = {                       # BGR
     "car":        (229, 135, 57),
     "motorcycle": (38, 89, 217),
@@ -83,7 +82,9 @@ def _fmt(dt: datetime) -> str:
 class CameraPipeline:
     def __init__(self, camera_id: str, video_path, start_time: datetime,
                  evidence_dir, vehicle_tracker=None, plate_detector=None,
-                 write_video: bool = True, output_dir=None):
+                 write_video: bool = True, output_dir=None,
+                 count_config: CountConfig | None = None,
+                 count_mode: str = DEFAULT_COUNT_MODE):
         if camera_id not in CAMERAS:
             raise KeyError(f"Unknown camera {camera_id}")
         self.cam = CAMERAS[camera_id]
@@ -103,39 +104,32 @@ class CameraPipeline:
         self.readings = {}
         self.track_meta = {}
         self.best_label = {}
-        # Unique-vehicle counting. class_votes[tid] tallies the class YOLO gave
-        # this track on each frame; the majority wins, so a car that flickers to
-        # "truck" for two frames is still counted once, as a car.
-        self.class_votes: dict = {}
-        self.track_frames: dict = {}
+        # Unique-vehicle counting lives in .counting.VehicleCounter: tracker ids
+        # are NOT vehicles (one vehicle fragments into several when the tracker
+        # loses it), so the counter stitches fragments and gates out clutter.
+        # It needs the frame size, so it is built in run().
+        self.count_config = count_config or self._config_from_camera()
+        self.count_mode = count_mode
+        self.counter: VehicleCounter | None = None
+        self.counted_vehicles: list = []
         self.stats = {"frames": 0, "vehicle_dets": 0, "plate_dets": 0,
                       "ocr_calls": 0, "ocr_success": 0}
 
+    def _config_from_camera(self) -> CountConfig:
+        """Per-camera counting overrides from cameras.json, if any."""
+        cfg = CountConfig()
+        line = getattr(self.cam, "count_line", None)
+        if line:
+            cfg.line = ((line[0], line[1]), (line[2], line[3]))
+        return cfg
+
     # ---------------- counting ----------------
 
-    def _note_tracks(self, tracks) -> None:
-        for t in tracks:
-            self.class_votes.setdefault(t.track_id, {})
-            self.class_votes[t.track_id][t.cls_name] = \
-                self.class_votes[t.track_id].get(t.cls_name, 0) + 1
-            self.track_frames[t.track_id] = self.track_frames.get(t.track_id, 0) + 1
-
-    def unique_counts(self) -> dict:
-        """Cumulative UNIQUE vehicles seen so far, by majority class per track."""
-        counts = {c: 0 for c in COUNT_CLASSES}
-        other = 0
-        for tid, votes in self.class_votes.items():
-            if self.track_frames.get(tid, 0) < MIN_FRAMES_TO_COUNT:
-                continue
-            cls = max(votes.items(), key=lambda kv: kv[1])[0]
-            if cls in counts:
-                counts[cls] += 1
-            else:
-                other += 1
-        counts["total"] = sum(counts[c] for c in COUNT_CLASSES) + other
-        if other:
-            counts["other"] = other
-        return counts
+    def unique_counts(self, mode: str | None = None) -> dict:
+        """Cumulative UNIQUE vehicles counted so far, by class."""
+        if self.counter is None:
+            return {c: 0 for c in (*COUNT_CLASSES, "total")}
+        return self.counter.counts(mode or self.count_mode)
 
     def _draw_counter(self, frame):
         counts = self.unique_counts()
@@ -153,7 +147,7 @@ class CameraPipeline:
         cv2.rectangle(frame, (10, 10), (10 + w, 10 + h), (70, 70, 70), 1)
 
         y = 10 + pad + 16
-        cv2.putText(frame, "VEHICLES COUNTED", (20, y),
+        cv2.putText(frame, f"VEHICLES ({self.count_mode.upper()})", (20, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (170, 170, 170), 1, cv2.LINE_AA)
         y += lh - 4
         for name, val in rows:
@@ -213,7 +207,11 @@ class CameraPipeline:
         for t in tracks:
             x1, y1, x2, y2 = [int(v) for v in t.box]
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 255), 2)
-            label = f"#{t.track_id} {t.cls_name}"
+            # Label with the COUNTED vehicle id, not the raw tracker id: the
+            # tracker fragments one vehicle across several ids, so raw ids on
+            # the boxes contradict the total drawn beside them.
+            vid = self.counter.canonical_id(t.track_id) if self.counter else None
+            label = f"#{vid if vid is not None else t.track_id} {t.cls_name}"
             plate = self.best_label.get(t.track_id)
             if plate:
                 label += f" | {plate}"
@@ -244,6 +242,7 @@ class CameraPipeline:
             writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"),
                                      fps / max(1, frame_stride), (w, h))
 
+        self.counter = VehicleCounter(w, h, self.count_config)
         self.vehicles.reset()
         frame_no, t0 = 0, time.time()
         while True:
@@ -258,7 +257,7 @@ class CameraPipeline:
 
             t_s = frame_no / fps
             tracks = self.vehicles.update(frame)
-            self._note_tracks(tracks)
+            self.counter.update(tracks, frame_no)
             plates = self.plates.detect(frame)
             self.stats["vehicle_dets"] += len(tracks)
             self.stats["plate_dets"] += len(plates)
@@ -295,13 +294,26 @@ class CameraPipeline:
         from . import preprocess as _pp
         self.stats["preprocess_variant_failures"] = dict(_pp.VARIANT_FAILURES)
 
-        # Unique vehicles counted (each track once, majority class).
-        counts = self.unique_counts()
+        # Unique vehicles: fragments stitched, clutter gated out. Both modes are
+        # recorded because "how many vehicles" has two honest answers when
+        # vehicles are parked in shot; `count_mode` says which one is headline.
+        report = self.counter.report()
+        counts = dict(report[self.count_mode])
         self.stats["unique_vehicles"] = counts.pop("total")
         self.stats["counts_by_class"] = counts
-        self.stats["count_min_frames"] = MIN_FRAMES_TO_COUNT
-        print(f"  [{self.camera_id}] unique vehicles counted: "
+        self.stats["count_mode"] = self.count_mode
+        self.stats["count_report"] = report
+        # The per-vehicle audit trail is deliberately NOT in stats: stats is
+        # printed and written to the DB row. It lives on the pipeline and is
+        # written to its own file by the caller.
+        self.counted_vehicles = [v.to_dict() for v in self.counter.vehicles()]
+        print(f"  [{self.camera_id}] unique vehicles ({self.count_mode}): "
               f"{self.stats['unique_vehicles']}  {counts}")
+        print(f"  [{self.camera_id}] traffic={report['traffic']['total']} "
+              f"presence={report['presence']['total']} from "
+              f"{report['raw_tracker_ids']} tracker ids "
+              f"({report['fragments_stitched']} fragments stitched, "
+              f"{report['rejected']} rejected as clutter)")
 
         if self.stats["ocr_engine_failures"]:
             print(f"  [{self.camera_id}] WARNING: OCR engine failed "

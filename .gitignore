@@ -6,3 +6,8 @@ data/output/*.mp4
 data/evidence/
 data/urbantrace.db*
 models/weights/*.pt
+data/cache/
+data/output/counts/*.jpg
+web/node_modules/
+web-dist/
+data/live_evidence/

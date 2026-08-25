@@ -17,7 +17,7 @@
             <meta name="viewport" content="width=device-width,
                 initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
             <style>
-                #map_4c69af860706b6bf9387cdc9d46590fe {
+                #map_5507c4cb8b376b33a1b142cc9c2cc143 {
                     position: relative;
                     width: 100.0%;
                     height: 100.0%;
@@ -55,16 +55,16 @@
 <body>
     
     
-            <div class="folium-map" id="map_4c69af860706b6bf9387cdc9d46590fe" ></div>
+            <div class="folium-map" id="map_5507c4cb8b376b33a1b142cc9c2cc143" ></div>
         
 </body>
 <script>
     
     
-            var map_4c69af860706b6bf9387cdc9d46590fe = L.map(
-                "map_4c69af860706b6bf9387cdc9d46590fe",
+            var map_5507c4cb8b376b33a1b142cc9c2cc143 = L.map(
+                "map_5507c4cb8b376b33a1b142cc9c2cc143",
                 {
-                    center: [13.0694, 80.1948],
+                    center: [13.09185, 80.1748],
                     crs: L.CRS.EPSG3857,
                     ...{
   "zoom": 13,
@@ -79,7 +79,7 @@
 
         
     
-            var tile_layer_19e394bd171cb51cdf2480532c263990 = L.tileLayer(
+            var tile_layer_683df5dda4b7c6235c13832644bcac9a = L.tileLayer(
                 "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
                 {
   "minZoom": 0,
@@ -96,11 +96,11 @@
             );
         
     
-            tile_layer_19e394bd171cb51cdf2480532c263990.addTo(map_4c69af860706b6bf9387cdc9d46590fe);
+            tile_layer_683df5dda4b7c6235c13832644bcac9a.addTo(map_5507c4cb8b376b33a1b142cc9c2cc143);
         
     
-            var heat_map_776afc8ce48e9b36def0e38c326df566 = L.heatLayer(
-                [[13.0694, 80.1948, 1.0]],
+            var heat_map_69d08bae52036c95fae14ddf02ad05ff = L.heatLayer(
+                [[13.0694, 80.1948, 0.25], [13.1143, 80.1548, 1.0]],
                 {
   "minOpacity": 0.35,
   "maxZoom": 18,
@@ -110,27 +110,50 @@
             );
         
     
-            heat_map_776afc8ce48e9b36def0e38c326df566.addTo(map_4c69af860706b6bf9387cdc9d46590fe);
+            heat_map_69d08bae52036c95fae14ddf02ad05ff.addTo(map_5507c4cb8b376b33a1b142cc9c2cc143);
         
     
-            var circle_marker_dae7b7f4d77c0d66c9d0b142b75cbdba = L.circleMarker(
+            var circle_marker_0565589e7112ed70b358a0d2e9608915 = L.circleMarker(
                 [13.0694, 80.1948],
                 {"bubblingMouseEvents": true, "color": "#ffd166", "dashArray": null, "dashOffset": null, "fill": true, "fillColor": "#ffd166", "fillOpacity": 0.9, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "opacity": 1.0, "radius": 9, "stroke": true, "weight": 3}
-            ).addTo(map_4c69af860706b6bf9387cdc9d46590fe);
+            ).addTo(map_5507c4cb8b376b33a1b142cc9c2cc143);
         
     
-        var popup_9c948d20960bfe932eed40168f82ba5a = L.popup({
+        var popup_e2b26b520b20d9ab0942180bd4584ead = L.popup({
   "maxWidth": "100%",
 });
 
         
             
-                var html_d4901689817318373b208b963242a548 = $(`<div id="html_d4901689817318373b208b963242a548" style="width: 100.0%; height: 100.0%;"><b>CAM_01</b> Koyambedu Junction<br>1 observations</div>`)[0];
-                popup_9c948d20960bfe932eed40168f82ba5a.setContent(html_d4901689817318373b208b963242a548);
+                var html_1d799b66322cf632580c3e2f57509482 = $(`<div id="html_1d799b66322cf632580c3e2f57509482" style="width: 100.0%; height: 100.0%;"><b>CAM_01</b> Koyambedu Junction<br>1 observations</div>`)[0];
+                popup_e2b26b520b20d9ab0942180bd4584ead.setContent(html_1d799b66322cf632580c3e2f57509482);
             
         
 
-        circle_marker_dae7b7f4d77c0d66c9d0b142b75cbdba.bindPopup(popup_9c948d20960bfe932eed40168f82ba5a)
+        circle_marker_0565589e7112ed70b358a0d2e9608915.bindPopup(popup_e2b26b520b20d9ab0942180bd4584ead)
+        ;
+
+        
+    
+    
+            var circle_marker_edfbfda91ac148a0fdbfabf4cfe0f122 = L.circleMarker(
+                [13.1143, 80.1548],
+                {"bubblingMouseEvents": true, "color": "#ffd166", "dashArray": null, "dashOffset": null, "fill": true, "fillColor": "#ffd166", "fillOpacity": 0.9, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "opacity": 1.0, "radius": 9, "stroke": true, "weight": 3}
+            ).addTo(map_5507c4cb8b376b33a1b142cc9c2cc143);
+        
+    
+        var popup_437abb2260332dfa42ddd0fd4dd68454 = L.popup({
+  "maxWidth": "100%",
+});
+
+        
+            
+                var html_600834f424198285f7d6f7adea629101 = $(`<div id="html_600834f424198285f7d6f7adea629101" style="width: 100.0%; height: 100.0%;"><b>CAM_02</b> Ambattur Estate<br>4 observations</div>`)[0];
+                popup_437abb2260332dfa42ddd0fd4dd68454.setContent(html_600834f424198285f7d6f7adea629101);
+            
+        
+
+        circle_marker_edfbfda91ac148a0fdbfabf4cfe0f122.bindPopup(popup_437abb2260332dfa42ddd0fd4dd68454)
         ;
 
         
