@@ -53,11 +53,11 @@ export default function Analytics() {
   }))
 
   const cams = [...new Set(timeline.map(t => t.camera_id))]
-  const buckets = [...new Set(timeline.map(t => t.bucket))].sort()
+  const buckets = [...new Set(timeline.map(t => t.bucket_s))].sort((a, b) => a - b)
   const series = buckets.map(b => {
-    const row: Record<string, string | number> = { t: String(b).slice(11, 19) }
+    const row: Record<string, string | number> = { t: `${b}s` }
     for (const c of cams) {
-      row[c] = timeline.find(x => x.bucket === b && x.camera_id === c)?.detections ?? 0
+      row[c] = timeline.find(x => x.bucket_s === b && x.camera_id === c)?.detections ?? 0
     }
     return row
   })
@@ -101,7 +101,8 @@ export default function Analytics() {
         </Panel>
       </div>
 
-      <Panel title="Detections over time, per camera" hint="traffic density trend">
+      <Panel title="Plate reads over time, per camera"
+             hint="30-second buckets of measured video time">
         {series.length === 0 ? <Empty title="No time series for this run" /> : (
           <ResponsiveContainer width="100%" height={260}>
             <LineChart data={series}>

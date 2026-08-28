@@ -223,7 +223,10 @@ export interface VehicleRow {
 }
 
 export interface TimelineBucket {
-  bucket: string
+  /** Start of the bucket in VIDEO time, seconds from the clip start.
+      The endpoint buckets on video_time_s, which is the measured quantity —
+      wall-clock is derived, so it would be the wrong axis for a trend. */
+  bucket_s: number
   camera_id: string
   detections: number
 }
