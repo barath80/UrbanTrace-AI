@@ -216,6 +216,22 @@ def main() -> int:
             if k != "run_id":
                 print(f"    {k}: {v}")
 
+        # Keep the city-network layer in step with the videos that were just
+        # processed. Without this the network views drift: they would keep
+        # showing cameras for videos that no longer exist, or miss a camera
+        # added by dropping a new video into data/videos/.
+        try:
+            sys.path.insert(0, str(ROOT / "scripts"))
+            from sync_network import mirror_run, sync_cameras
+            cam = sync_cameras(prune=True)
+            mir = mirror_run(rep["run_id"])
+            print(f"  city network: {cam['cameras']} camera(s), "
+                  f"{cam['edges']} edge(s), {mir['sightings']} sighting(s) mirrored")
+            if cam["removed"]:
+                print(f"    removed stale cameras: {cam['removed']}")
+        except Exception as e:
+            print(f"  city network sync skipped: {type(e).__name__}: {e}")
+
     print("\n" + "=" * 78)
     print(f"observations       : {len(all_obs)}")
     print(f"global vehicles    : {summary['global_vehicles']}")

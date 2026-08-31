@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..db import repository as repo
 from .config import SCALE
-from .identity import canonical_key, same_vehicle
+from .identity import blocking_keys, canonical_key, same_vehicle
 
 
 def _window(hours: float) -> datetime:
@@ -44,6 +44,12 @@ def plate_trajectory(plate: str, hours: float = 24.0, limit: int = 500) -> dict:
     if not plate:
         return {"plate": plate, "sightings": [], "legs": [], "cameras": 0}
 
+    # Match on the SAME blocking keys the identity resolver uses, not just the
+    # exact canonical form. A dropped or spurious character shifts the canonical
+    # key, so an exact match silently loses those sightings -- TN01AB1234 read
+    # at one camera and TN01A8123 at the next would look like two vehicles and
+    # the journey would collapse to a single camera.
+    keys = blocking_keys(plate)
     rows = repo._fetch("""
         select s.sighting_id, s.camera_id, s.plate, s.cluster_id, s.observed_at,
                s.confidence, s.vehicle_type, s.track_id, s.support, s.total_readings,
@@ -51,10 +57,10 @@ def plate_trajectory(plate: str, hours: float = 24.0, limit: int = 500) -> dict:
                c.name as camera_name, c.road, c.sector, c.direction
         from net_sightings s
         left join net_cameras c on c.camera_id = s.camera_id
-        where s.plate_canonical = %s and s.observed_at >= %s
+        where s.plate_canonical = any(%s) and s.observed_at >= %s
         order by s.observed_at
         limit %s
-    """, (canonical_key(plate), _window(hours), limit))
+    """, (keys, _window(hours), limit))
 
     sightings = [r for r in rows if same_vehicle(plate, r["plate"])]
     legs = _legs_from(sightings)
@@ -133,11 +139,13 @@ def search_plates(fragment: str, hours: float = 24.0, limit: int = 50) -> list:
                min(observed_at) as first_seen, max(observed_at) as last_seen,
                round(avg(confidence)::numeric, 3) as mean_confidence
         from net_sightings
-        where observed_at >= %s and (plate like %s or plate_canonical like %s)
+        where observed_at >= %s
+          and (plate like %s or plate_canonical like %s or plate_canonical = any(%s))
         group by plate
         order by cameras desc, sightings desc
         limit %s
-    """, (_window(hours), f"%{frag}%", f"%{canonical_key(frag)}%", limit))
+    """, (_window(hours), f"%{frag}%", f"%{canonical_key(frag)}%",
+          blocking_keys(frag), limit))
 
 
 # ------------------------------------------------------------- density
