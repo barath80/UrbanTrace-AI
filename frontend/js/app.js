@@ -656,7 +656,7 @@ async function loadAlerts() {
   const box = document.getElementById('alert-list');
   box.innerHTML = alerts.length ? alerts.map(a => {
     const sev = (a.severity || '').toLowerCase() === 'high' ? 'high' : 'medium';
-    const icon = a.alert_type === 'WATCHLIST_MATCH' ? '🚨' : '⚠️';
+    const icon = a.alert_type === 'WATCHLIST_MATCH' ? 'MATCH' : 'ANOMALY';
     return `<div class="alert-card">
       <div class="alert-icon ${sev}">${icon}</div>
       <div class="alert-body">

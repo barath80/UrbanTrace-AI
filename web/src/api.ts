@@ -231,6 +231,98 @@ export interface TimelineBucket {
   detections: number
 }
 
+export interface MultiCamSlot {
+  camera_id: string
+  name: string
+  road: string
+  latitude: number
+  longitude: number
+  status: 'playing' | 'waiting' | 'disconnected' | 'reconnecting' | 'stopped' | 'ended' | 'error'
+  source_type: string
+  source_label: string
+  video_name: string
+  fps: number
+  frame_count: number
+  resolution: string
+  video_time_s: number
+  loops?: number
+  timestamp: string
+  has_feed: boolean
+  error_message: string | null
+  plates_detected_count?: number
+}
+
+export interface MultiCamDetection {
+  plate: string
+  confidence: number
+  support: number
+  total_readings: number
+  agreement: number
+  is_valid_format: boolean
+  vehicle_type: string
+  track_id: number
+  camera_id: string
+  location: string
+  latitude: number
+  longitude: number
+  observed_at: string
+  video_time_s: number
+}
+
+/** One camera-to-camera hop measured from real arrival times. */
+export interface MultiCamLeg {
+  from_camera: string
+  to_camera: string
+  departed: string
+  arrived: string
+  travel_minutes: number
+  road_distance_km: number
+  implied_speed_kmh: number | null
+  distance_source: string
+  verdict: string
+  reason: string
+}
+
+/** A vehicle the live network has seen, with its reconstructed journey. */
+export interface MultiCamVehicle {
+  plate: string
+  variants: string[]
+  camera_count: number
+  sighting_count: number
+  route: string[]
+  route_display: string
+  first_seen: string
+  last_seen: string
+  confidence: number
+  vehicle_type: string
+  sightings: MultiCamDetection[]
+  legs: MultiCamLeg[]
+  status: 'MULTI_CAMERA' | 'SINGLE_CAMERA'
+}
+
+export interface MultiCamNetwork {
+  vehicles: number
+  multi_camera_vehicles: number
+  sightings: number
+  cameras_with_sightings: number
+}
+
+export interface MultiCamStatusResponse {
+  cameras: MultiCamSlot[]
+  detections: MultiCamDetection[]
+  network: MultiCamNetwork
+  timestamp: string
+  all_connected: boolean
+}
+
+export interface MultiCamInfo {
+  primary_ip: string
+  local_ips: string[]
+  port: number
+  phone_urls: Record<string, string>
+  cameras: MultiCamSlot[]
+}
+
 /* --------------------------------------------------------- endpoints */
 
 export const getHealth = () => api<Health>('/health')
@@ -263,3 +355,205 @@ export const roadRoute = (from: string, to: string) =>
   api<RoadLeg & { is_real_road: boolean }>(
     `/road-route?from_camera=${encodeURIComponent(from)}&to_camera=${encodeURIComponent(to)}`,
   )
+
+/* Multi-Camera 3-Feed Ingest & Status */
+export const getMultiCamStatus = () => api<MultiCamStatusResponse>('/multi-camera/status')
+export const getMultiCamDetections = () => api<MultiCamDetection[]>('/multi-camera/detections')
+export const getMultiCamInfo = () => api<MultiCamInfo>('/multi-camera/info')
+export const connectMultiCamUrl = (cameraId: string, url: string, videoName = '') =>
+  api<MultiCamSlot>(
+    `/multi-camera/connect-url?camera_id=${encodeURIComponent(cameraId)}&url=${encodeURIComponent(url)}&video_name=${encodeURIComponent(videoName)}`,
+    { method: 'POST' },
+  )
+export const connectMultiCamLocal = (cameraId: string, videoFile = '') =>
+  api<MultiCamSlot>(
+    `/multi-camera/connect-local?camera_id=${encodeURIComponent(cameraId)}&video_file=${encodeURIComponent(videoFile)}`,
+    { method: 'POST' },
+  )
+export const stopMultiCamStream = (cameraId: string) =>
+  api<MultiCamSlot>(`/multi-camera/stop/${encodeURIComponent(cameraId)}`, { method: 'POST' })
+export const stopAllMultiCamStreams = () =>
+  api<{ status: string; cameras: MultiCamSlot[] }>('/multi-camera/stop-all', { method: 'POST' })
+export const getMultiCamVehicles = () => api<MultiCamVehicle[]>('/multi-camera/vehicles')
+export const resetMultiCamRegistry = () =>
+  api<MultiCamNetwork>('/multi-camera/reset-registry', { method: 'POST' })
+
+/* ------------------------------------------------ city network (scale) */
+/* These read the continuous `net_*` tables: the live camera estate rather
+   than a single batch run. Windows are in hours. */
+
+export interface NetSummary {
+  cameras: number
+  active_cameras: number
+  sightings: number
+  unique_vehicles: number
+  multi_camera_vehicles: number
+  alerts: number
+  mean_confidence: number | null
+  mean_speed_kmh: number | null
+  window_hours: number
+}
+
+export interface NetDensity {
+  camera_id: string
+  name: string
+  road: string | null
+  sector: string | null
+  latitude: number
+  longitude: number
+  sightings: number
+  unique_vehicles: number
+  mean_confidence: number | null
+  vehicles_per_minute: number
+  last_sighting: string | null
+}
+
+export interface NetHeatPoint {
+  camera_id: string
+  name: string
+  latitude: number
+  longitude: number
+  observations: number
+  vehicles: number
+}
+
+export interface NetFlow {
+  from_camera: string
+  to_camera: string
+  from_name: string | null
+  to_name: string | null
+  from_lat: number
+  from_lon: number
+  to_lat: number
+  to_lon: number
+  vehicles: number
+  mean_travel_minutes: number | null
+  mean_speed_kmh: number | null
+  road_distance_km: number | null
+}
+
+export interface NetCongestion extends NetFlow {
+  speed_kmh: number | null
+  baseline_kmh: number | null
+  speed_ratio: number | null
+  travel_minutes: number | null
+  baseline_travel_minutes: number | null
+  baseline_samples: number
+  severity: 'MODERATE' | 'HEAVY' | 'SEVERE'
+}
+
+export interface NetTrendBucket {
+  bucket: string
+  sightings: number
+  unique_vehicles: number
+  active_cameras: number
+}
+
+export interface NetSighting {
+  sighting_id: string
+  camera_id: string
+  camera_name: string | null
+  road: string | null
+  sector: string | null
+  plate: string
+  cluster_id: string | null
+  observed_at: string
+  confidence: number
+  vehicle_type: string | null
+  track_id: number
+  support: number
+  total_readings: number
+  is_valid_format: boolean
+  latitude: number
+  longitude: number
+  direction: string | null
+}
+
+export interface NetLeg {
+  from_camera: string
+  to_camera: string
+  departed: string
+  arrived: string
+  travel_minutes: number
+  road_distance_km: number
+  implied_speed_kmh: number | null
+  distance_source: string
+  verdict: string
+  reason: string
+}
+
+export interface NetTrajectory {
+  plate: string
+  sightings: NetSighting[]
+  legs: NetLeg[]
+  cameras: number
+  first_seen: string | null
+  last_seen: string | null
+  spellings: string[]
+  window_hours: number
+}
+
+export interface NetPlateHit {
+  plate: string
+  sightings: number
+  cameras: number
+  first_seen: string
+  last_seen: string
+  mean_confidence: number
+}
+
+export interface NetAlert {
+  id: number
+  alert_type: string
+  severity: string
+  plate: string | null
+  cluster_id: string | null
+  camera_id: string | null
+  camera_name: string | null
+  occurred_at: string
+  confidence: number | null
+  reason: string
+  evidence: Record<string, unknown> | null
+  status: string
+}
+
+export interface NetCamera {
+  camera_id: string
+  name: string
+  road: string
+  sector: string
+  latitude: number
+  longitude: number
+  direction: string
+  source: string
+  enabled: boolean
+}
+
+export interface NetCameras {
+  registry: { cameras: number; enabled: number; edges: number; sectors: Record<string, number> }
+  cameras: NetCamera[]
+}
+
+const w = (hours: number) => `hours=${hours}`
+
+export const getNetSummary = (hours = 24) => api<NetSummary>(`/network/summary?${w(hours)}`)
+export const getNetCameras = () => api<NetCameras>('/network/cameras')
+export const getNetDensity = (hours = 24) => api<NetDensity[]>(`/network/density?${w(hours)}`)
+export const getNetHeatmap = (hours = 24) => api<NetHeatPoint[]>(`/network/heatmap?${w(hours)}`)
+export const getNetFlows = (hours = 24) =>
+  api<NetFlow[]>(`/network/origin-destination?${w(hours)}`)
+export const getNetCongestion = (hours = 24, minSamples = 1) =>
+  api<NetCongestion[]>(`/network/congestion?${w(hours)}&min_samples=${minSamples}`)
+export const getNetTrend = (hours = 24, bucketMinutes = 15) =>
+  api<NetTrendBucket[]>(`/network/trend?${w(hours)}&bucket_minutes=${bucketMinutes}`)
+export const getNetTrajectory = (plate: string, hours = 24) =>
+  api<NetTrajectory>(`/network/trajectory/${encodeURIComponent(plate)}?${w(hours)}`)
+export const searchNetPlates = (q: string, hours = 24) =>
+  api<NetPlateHit[]>(`/network/search?q=${encodeURIComponent(q)}&${w(hours)}`)
+export const getNetAlerts = (hours = 24) => api<NetAlert[]>(`/network/alerts?${w(hours)}`)
+export const addNetWatchlist = (plate: string, reason = '') =>
+  api(`/network/watchlist/${encodeURIComponent(plate)}?reason=${encodeURIComponent(reason)}`,
+      { method: 'POST' })
+export const getNetWatchlist = () =>
+  api<{ plate: string; reason: string; severity: string; active: boolean }[]>('/network/watchlist')
+export const getNetStatus = () => api<Record<string, unknown>>('/network/status')

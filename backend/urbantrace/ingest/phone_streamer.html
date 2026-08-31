@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>UrbanTrace - Phone Video Streamer</title>
+  <style>
+    :root {
+      --bg: #0b0e13;
+      --surface-1: #11151d;
+      --surface-2: #161b25;
+      --surface-3: #1d2431;
+      --border: #262f3d;
+      --ink: #f2f5f9;
+      --ink-2: #b9c2ce;
+      --ink-muted: #7c8899;
+      --s1: #3987e5;
+      --ok: #199e70;
+      --warning: #fab219;
+      --critical: #d03b3b;
+      --radius: 12px;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 14px;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      -webkit-font-smoothing: antialiased;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--s1), var(--ok));
+      display: grid;
+      place-items: center;
+      font-size: 14px;
+    }
+    .cam-tag {
+      font-family: var(--mono);
+      font-weight: 700;
+      font-size: 13px;
+      padding: 4px 10px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--s1);
+    }
+    .card {
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .card h2 {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--ink-2);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .btn-select {
+      background: var(--s1);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 600;
+      padding: 14px;
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+      text-align: center;
+      display: block;
+      width: 100%;
+      box-shadow: 0 4px 14px rgba(57, 135, 229, 0.3);
+    }
+    .btn-select:active { transform: scale(0.98); }
+    input[type="file"] { display: none; }
+
+    .control-actions {
+      display: flex;
+      gap: 10px;
+    }
+    .btn-action {
+      flex: 1;
+      padding: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 8px;
+      border: 0;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: filter 0.15s;
+    }
+    .btn-action.stop {
+      background: rgba(208, 59, 59, 0.2);
+      color: var(--critical);
+      border: 1px solid rgba(208, 59, 59, 0.4);
+    }
+    .btn-action.resume {
+      background: var(--ok);
+      color: #fff;
+    }
+    .btn-action:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .video-container {
+      position: relative;
+      width: 100%;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      aspect-ratio: 16 / 9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .osd {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      right: 8px;
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(4px);
+      padding: 4px 8px;
+      border-radius: 4px;
+      color: #fff;
+      pointer-events: none;
+    }
+    .osd-rec {
+      color: var(--critical);
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .osd-rec::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--critical);
+      display: inline-block;
+      animation: blink 1s infinite;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.2; }
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+    .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+    .dot.warn { background: var(--warning); }
+    .dot.bad { background: var(--critical); }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+    }
+    .stat-box {
+      background: var(--surface-2);
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .stat-label {
+      font-size: 10.5px;
+      color: var(--ink-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .stat-val {
+      font-family: var(--mono);
+      font-size: 16px;
+      font-weight: 700;
+      margin-top: 3px;
+      color: var(--ink);
+    }
+    .camera-tabs {
+      display: flex;
+      gap: 6px;
+      background: var(--surface-2);
+      padding: 4px;
+      border-radius: 8px;
+    }
+    .cam-btn {
+      flex: 1;
+      padding: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      background: transparent;
+      border: 0;
+      color: var(--ink-muted);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .cam-btn.active {
+      background: var(--s1);
+      color: #fff;
+    }
+    .hint {
+      font-size: 11.5px;
+      color: var(--ink-muted);
+      line-height: 1.4;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-mark">UT</div>
+      <div>
+        <div style="font-size: 13px; font-weight: 700;">UrbanTrace</div>
+        <div style="font-size: 10.5px; color: var(--ink-muted);">Phone Video Streamer</div>
+      </div>
+    </div>
+    <div id="camIdBadge" class="cam-tag">CAM_001</div>
+  </header>
+
+  <!-- Camera Slot Selector -->
+  <div class="camera-tabs">
+    <button class="cam-btn" onclick="setCamera('CAM_001')">Phone 1 (CAM_001)</button>
+    <button class="cam-btn" onclick="setCamera('CAM_002')">Phone 2 (CAM_002)</button>
+    <button class="cam-btn" onclick="setCamera('CAM_003')">Phone 3 (CAM_003)</button>
+  </div>
+
+  <!-- Video File Selection & Player -->
+  <div class="card">
+    <h2>
+      <span>1. Stored Video File</span>
+      <span id="statusBadge" class="status-badge">
+        <span id="statusDot" class="dot warn"></span>
+        <span id="statusText">Waiting for Video</span>
+      </span>
+    </h2>
+
+    <label class="btn-select" id="btnSelectLabel">
+      Select stored video file
+      <input type="file" id="videoFileInput" accept="video/*">
+    </label>
+
+    <div class="control-actions" id="controlActions" style="display: none;">
+      <button class="btn-action stop" id="btnStopStream" onclick="stopStream()">
+        Stop streaming
+      </button>
+      <button class="btn-action resume" id="btnResumeStream" onclick="resumeStream()" style="display: none;">
+        Resume streaming
+      </button>
+    </div>
+
+    <div class="video-container">
+      <video id="videoPlayer" muted playsinline webkit-playsinline></video>
+      <div class="osd" id="osd" style="display: none;">
+        <span class="osd-rec" id="osdRecText">STREAMING (LOOP)</span>
+        <span id="osdTime">00:00:00</span>
+      </div>
+    </div>
+
+    <div class="hint">
+      The video plays in a continuous loop until you stop it.
+      The phone camera is not used. The screen stays awake while streaming.
+    </div>
+  </div>
+
+  <!-- Realtime Streaming Stats -->
+  <div class="card">
+    <h2>2. Stream Performance</h2>
+    <div class="stats-grid">
+      <div class="stat-box">
+        <div class="stat-label">Stream FPS</div>
+        <div class="stat-val" id="fpsVal">0.0</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Frames Sent</div>
+        <div class="stat-val" id="framesVal">0</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Video Time</div>
+        <div class="stat-val" id="timeVal">0.0s</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Auto Loops</div>
+        <div class="stat-val" id="loopsVal">0</div>
+      </div>
+    </div>
+  </div>
+
+  <canvas id="frameCanvas" style="display: none;"></canvas>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    let currentCam = urlParams.get('cam') || 'CAM_001';
+
+    const videoInput = document.getElementById('videoFileInput');
+    const video = document.getElementById('videoPlayer');
+    const canvas = document.getElementById('frameCanvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const osd = document.getElementById('osd');
+    const osdRecText = document.getElementById('osdRecText');
+    const osdTime = document.getElementById('osdTime');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const fpsVal = document.getElementById('fpsVal');
+    const framesVal = document.getElementById('framesVal');
+    const timeVal = document.getElementById('timeVal');
+    const loopsVal = document.getElementById('loopsVal');
+    const camIdBadge = document.getElementById('camIdBadge');
+    const controlActions = document.getElementById('controlActions');
+    const btnStopStream = document.getElementById('btnStopStream');
+    const btnResumeStream = document.getElementById('btnResumeStream');
+
+    let ws = null;
+    let streamInterval = null;
+    let framesSent = 0;
+    let loopsCount = 0;
+    let lastFpsTime = performance.now();
+    let framesThisSec = 0;
+    let selectedFileName = '';
+    let isStreamStopped = false;
+    let wakeLock = null;
+    let isEncoding = false;
+    let encodeSeq = 0;
+
+    function setCamera(camId) {
+      currentCam = camId;
+      camIdBadge.textContent = camId;
+      document.querySelectorAll('.cam-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.textContent.includes(camId));
+      });
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.close(); } catch(e){}
+      }
+      initWebSocket();
+    }
+
+    setCamera(currentCam);
+
+    async function requestWakeLock() {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen');
+        }
+      } catch (err) {
+        console.log('WakeLock error:', err);
+      }
+    }
+
+    function initWebSocket() {
+      const loc = window.location;
+      const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${loc.host}/ws/multi-camera/ingest/${currentCam}`;
+
+      try {
+        if (ws) {
+          try { ws.close(); } catch(e){}
+        }
+        ws = new WebSocket(wsUrl);
+        ws.binaryType = 'blob';
+
+        ws.onopen = () => {
+          console.log('WebSocket Connected to laptop for ' + currentCam);
+          if (video.src && !isStreamStopped) {
+            updateStatus('ok', 'Streaming Live to Laptop (Loop)');
+            sendMeta();
+            startStreaming();
+          } else if (isStreamStopped) {
+            updateStatus('warn', 'Stream Stopped');
+          } else {
+            updateStatus('warn', 'Connected - Select Video');
+          }
+        };
+
+        ws.onclose = () => {
+          console.log('WebSocket Closed - Reconnecting...');
+          if (!isStreamStopped) {
+            updateStatus('bad', 'Disconnected. Retrying...');
+            setTimeout(initWebSocket, 600);
+          }
+        };
+
+        ws.onerror = (e) => {
+          console.log('WebSocket error:', e);
+          updateStatus('bad', 'Connection Error');
+        };
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function updateStatus(type, text) {
+      statusDot.className = 'dot ' + type;
+      statusText.textContent = text;
+    }
+
+    function sendMeta() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({
+            type: 'meta',
+            video_name: selectedFileName || 'Prerecorded Video',
+            loops: loopsCount
+          }));
+        } catch (e) {}
+      }
+    }
+
+    videoInput.addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      selectedFileName = file.name;
+      const fileURL = URL.createObjectURL(file);
+      video.src = fileURL;
+      video.load();
+
+      video.onloadeddata = () => {
+        isStreamStopped = false;
+        controlActions.style.display = 'flex';
+        btnStopStream.style.display = 'flex';
+        btnResumeStream.style.display = 'none';
+
+        video.play().then(() => {
+          requestWakeLock();
+          startStreaming();
+        }).catch(err => {
+          console.log('Auto-play blocked:', err);
+        });
+      };
+    });
+
+    // CONTINUOUS AUTO-LOOP: When video reaches end, seamlessly loop back to start
+    video.addEventListener('ended', () => {
+      loopsCount++;
+      loopsVal.textContent = loopsCount;
+      video.currentTime = 0;
+      video.play().then(() => {
+        sendMeta();
+      }).catch(() => {});
+    });
+
+    video.addEventListener('timeupdate', () => {
+      const cur = video.currentTime;
+      timeVal.textContent = cur.toFixed(1) + 's';
+      const mins = Math.floor(cur / 60).toString().padStart(2, '0');
+      const secs = Math.floor(cur % 60).toString().padStart(2, '0');
+      const ms = Math.floor((cur % 1) * 100).toString().padStart(2, '0');
+      osdTime.textContent = `${mins}:${secs}:${ms}`;
+    });
+
+    function stopStream() {
+      isStreamStopped = true;
+      video.pause();
+      if (streamInterval) clearInterval(streamInterval);
+      streamInterval = null;
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'stop' })); } catch(e){}
+      }
+
+      btnStopStream.style.display = 'none';
+      btnResumeStream.style.display = 'flex';
+      osdRecText.textContent = 'PAUSED';
+      osdRecText.style.color = 'var(--warning)';
+      updateStatus('warn', 'Streaming Paused / Stopped');
+      fpsVal.textContent = '0.0';
+    }
+
+    function resumeStream() {
+      isStreamStopped = false;
+      btnStopStream.style.display = 'flex';
+      btnResumeStream.style.display = 'none';
+      osdRecText.textContent = 'STREAMING (LOOP)';
+      osdRecText.style.color = 'var(--critical)';
+
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        initWebSocket();
+      } else {
+        try { ws.send(JSON.stringify({ type: 'resume' })); } catch (e) {}
+      }
+
+      video.play().then(() => {
+        startStreaming();
+      }).catch(() => {});
+    }
+
+    function sendFrameHttp(blob) {
+      fetch(`/api/multi-camera/ingest/${currentCam}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/jpeg' },
+        body: blob
+      }).then(() => {
+        framesSent++;
+        framesThisSec++;
+        framesVal.textContent = framesSent;
+      }).catch(() => {});
+    }
+
+    function startStreaming() {
+      osd.style.display = 'flex';
+      updateStatus('ok', 'Streaming Live to Laptop (Loop)');
+      sendMeta();
+
+      const aspect = (video.videoHeight || 9) / (video.videoWidth || 16);
+      // Plate glyphs survive or die here: at 640 wide a plate is a smear.
+      // 960 keeps the text legible and still encodes well within the frame
+      // budget on a modern phone.
+      const targetWidth = 960;
+      const targetHeight = Math.round(targetWidth * aspect);
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+
+      if (streamInterval) clearInterval(streamInterval);
+      const frameIntervalMs = 33; // 30 FPS playback
+
+      streamInterval = setInterval(() => {
+        if (isStreamStopped) return;
+
+        // Auto resume video if browser paused it
+        if (video.paused && !isStreamStopped && video.src) {
+          video.play().catch(() => {});
+        }
+
+        if (isEncoding || !video.videoWidth) return;
+
+        isEncoding = true;
+        try {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((blob) => {
+            isEncoding = false;
+            if (!blob) return;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(blob);
+                framesSent++;
+                framesThisSec++;
+                framesVal.textContent = framesSent;
+              } catch (err) {
+                sendFrameHttp(blob);
+              }
+            } else {
+              sendFrameHttp(blob);
+            }
+          }, 'image/jpeg', 0.8);
+        } catch (e) {
+          isEncoding = false;
+        }
+
+        // Safety watchdog: only release the lock if this same encode is still
+        // outstanding, otherwise it clears a newer one mid-flight.
+        const guard = ++encodeSeq;
+        setTimeout(() => { if (guard === encodeSeq) isEncoding = false; }, 1000);
+
+        const now = performance.now();
+        if (now - lastFpsTime >= 1000) {
+          fpsVal.textContent = framesThisSec.toFixed(1);
+          framesThisSec = 0;
+          lastFpsTime = now;
+          sendMeta();
+        }
+      }, frameIntervalMs);
+    }
+  </script>
+</body>
+</html>

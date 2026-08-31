@@ -25,6 +25,8 @@ from ..db import repository as repo
 from ..db.client import ping
 from ..alerts import load_watchlist_file
 from ..ingest import MANAGER as LIVE
+from ..ingest.multicam import router as multicam_router
+from .scale_routes import router as network_router
 from ..analytics import journey_stats, path_heat_points
 from ..routing import describe as routing_describe, road_route
 from ..trajectory.paths import build_vehicle_paths
@@ -40,6 +42,30 @@ app = FastAPI(title="UrbanTrace AI",
               version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
+app.include_router(multicam_router)
+app.include_router(network_router)
+
+
+@app.on_event("startup")
+def startup_event():
+    import threading
+    from ..ingest.multicam import MULTICAM
+    def _load_network():
+        # The city registry is read from the database once at boot so spatial
+        # lookups and graph edges are ready before the first sighting arrives.
+        try:
+            from ..scale.service import load_cameras_from_db
+            n = load_cameras_from_db()
+            print(f"[api] camera network loaded: {n} camera(s)")
+        except Exception as e:
+            print(f"[api] camera network not loaded: {type(e).__name__}: {e}")
+
+    threading.Thread(target=_load_network, daemon=True).start()
+
+    def _prewarm():
+        for slot in MULTICAM.slots.values():
+            slot._ensure_models()
+    threading.Thread(target=_prewarm, daemon=True).start()
 
 
 def _run(run_id: str | None) -> str:
@@ -576,6 +602,7 @@ def legacy_index():
 
 
 @app.get("/")
+@app.get("/multi-camera")
 def index():
     """The React dashboard, falling back to the legacy one if it is not built."""
     react = WEB_DIST / "index.html"

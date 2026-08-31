@@ -140,8 +140,96 @@ class PlateOCR:
 
         return max(scored, key=lambda s: s[0])[2]
 
+    def _rank_variants(self, names: list, preds: list) -> OCRResult | None:
+        """Score one plate's preprocessing variants and pick the winner.
+
+        Shared by `read` and `read_many` so the single-plate and batched paths
+        can never drift apart in how they choose a reading.
+        """
+        scored = []
+        for name, pred in zip(names, preds):
+            raw = _clean(getattr(pred, "plate", ""))
+            if not raw:
+                continue
+            mean_c, min_c, chars = _score(pred, raw)
+            v: PlateValidation = validate(raw)
+            rank = mean_c * (0.55 + 0.45 * v.format_confidence) + (0.05 if v.is_valid else 0.0)
+            scored.append((rank, name, OCRResult(
+                text_raw=raw, text_final=v.final, confidence=round(mean_c, 4),
+                min_char_confidence=round(min_c, 4), variant=name,
+                is_valid_format=v.is_valid, repaired=v.repaired,
+                corrections=v.corrections, char_confidences=chars)))
+        if not scored:
+            return None
+
+        if self.consensus and len(scored) > 1:
+            agree = {}
+            for rank, _n, r in scored:
+                agree[r.text_final] = agree.get(r.text_final, 0.0) + rank
+            best_text = max(agree.items(), key=lambda kv: kv[1])[0]
+            supporting = [s for s in scored if s[2].text_final == best_text]
+            top = max(supporting, key=lambda s: s[0])
+            res = top[2]
+            res.variant = f"{top[1]}+{len(supporting)}/{len(scored)}"
+            res.confidence = round(res.confidence * (0.80 + 0.20 * len(supporting) / len(scored)), 4)
+            return res
+        return max(scored, key=lambda s: s[0])[2]
+
+    def read_many(self, plate_images: list) -> list:
+        """OCR several plates in ONE engine call.
+
+        `read()` issues one call per plate. Across a camera network that is the
+        dominant per-frame cost, because each call carries fixed dispatch
+        overhead and leaves the accelerator mostly idle. Here every variant of
+        every plate is flattened into a single batch, run once, and scattered
+        back to its plate, which is the same arithmetic the detector already
+        benefits from.
+
+        Returns a list aligned with `plate_images`; entries are None where the
+        crop was unusable or the engine returned nothing.
+        """
+        out: list = [None] * len(plate_images)
+        flat: list = []
+        spans: list = []          # (index, variant names, slice start, slice end)
+        for i, img in enumerate(plate_images):
+            if img is None or getattr(img, "size", 0) == 0:
+                continue
+            rendered = pp.build_variants(img, names=self.variants)
+            names = list(rendered.keys())
+            if not names:
+                continue
+            start = len(flat)
+            flat.extend(rendered[n] for n in names)
+            spans.append((i, names, start, len(flat)))
+
+        if not flat:
+            return out
+
+        self.calls += len(spans)
+        try:
+            preds = self._engine.run(flat, return_confidence=True)
+        except Exception as e:
+            self.failures += len(spans)
+            self.last_error = f"{type(e).__name__}: {e}"
+            if self.failures in (1, 10, 100) or self.failures % 500 == 0:
+                import warnings
+                warnings.warn(f"OCR engine failed {self.failures}x "
+                              f"(latest: {self.last_error})", RuntimeWarning)
+            return out
+        if not preds:
+            return out
+        if not isinstance(preds, (list, tuple)):
+            preds = [preds]
+
+        for idx, names, a, b in spans:
+            chunk = preds[a:b]
+            if len(chunk) != len(names):
+                continue
+            out[idx] = self._rank_variants(names, chunk)
+        return out
+
     def read_batch(self, plate_images: list) -> list:
-        return [self.read(im) for im in plate_images]
+        return self.read_many(plate_images)
 
 
 @lru_cache(maxsize=1)

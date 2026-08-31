@@ -5,16 +5,33 @@ import { getHealth, getSummary, type Health } from './api'
 import Alerts from './views/Alerts'
 import Analytics from './views/Analytics'
 import Cameras from './views/Cameras'
+import CityNetwork from './views/CityNetwork'
+import CityTrack from './views/CityTrack'
 import GisMap from './views/GisMap'
 import Live from './views/Live'
+import MultiCamera from './views/MultiCamera'
 import Observations from './views/Observations'
 import Overview from './views/Overview'
 import TrackVehicle from './views/TrackVehicle'
 
-type ViewId = 'overview' | 'live' | 'map' | 'track' | 'analytics' | 'cameras' | 'alerts' | 'data'
+type ViewId =
+  | 'overview'
+  | 'city'
+  | 'citytrack'
+  | 'multicam'
+  | 'live'
+  | 'map'
+  | 'track'
+  | 'analytics'
+  | 'cameras'
+  | 'alerts'
+  | 'data'
 
 const TABS: { id: ViewId; label: string; short: string }[] = [
   { id: 'overview', label: 'Overview', short: 'Home' },
+  { id: 'city', label: 'City Analytics', short: 'City' },
+  { id: 'citytrack', label: 'Track Vehicle (Network)', short: 'Trace' },
+  { id: 'multicam', label: 'Multi-Camera (3-Feed)', short: 'Multi-Cam' },
   { id: 'live', label: 'Live Monitor', short: 'Live' },
   { id: 'map', label: 'GIS Map', short: 'Map' },
   { id: 'track', label: 'Vehicle Tracking', short: 'Track' },
@@ -24,8 +41,17 @@ const TABS: { id: ViewId; label: string; short: string }[] = [
   { id: 'data', label: 'Observations', short: 'Data' },
 ]
 
+function getInitialView(): ViewId {
+  const path = window.location.pathname.toLowerCase()
+  const hash = window.location.hash.toLowerCase()
+  if (path.includes('multi-camera') || hash.includes('multi-camera') || hash.includes('multicam')) {
+    return 'multicam'
+  }
+  return 'overview'
+}
+
 export default function App() {
-  const [view, setView] = useState<ViewId>('overview')
+  const [view, setView] = useState<ViewId>(getInitialView)
   const [health, setHealth] = useState<Health | null>(null)
   const [alertCount, setAlertCount] = useState(0)
   const [plate, setPlate] = useState<string | undefined>()
@@ -49,9 +75,9 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">◉</div>
+          <div className="brand-mark">UT</div>
           <div>
-            <h1>UrbanTrace AI</h1>
+            <h1>UrbanTrace</h1>
             <p>City-wide ANPR · Trajectory · Traffic Intelligence</p>
           </div>
         </div>
@@ -77,7 +103,14 @@ export default function App() {
           <button
             key={t.id}
             className={`tab${view === t.id ? ' on' : ''}`}
-            onClick={() => setView(t.id)}
+            onClick={() => {
+              setView(t.id)
+              if (t.id === 'multicam') {
+                window.history.pushState(null, '', '/multi-camera')
+              } else if (t.id === 'overview') {
+                window.history.pushState(null, '', '/')
+              }
+            }}
           >
             <span className="tab-full">{t.label}</span>
             <span className="tab-short">{t.short}</span>
@@ -102,6 +135,9 @@ export default function App() {
             transition={{ duration: 0.22, ease: 'easeOut' }}
           >
             {view === 'overview' && <Overview onTrack={track} />}
+            {view === 'city' && <CityNetwork />}
+            {view === 'citytrack' && <CityTrack initialPlate={plate} />}
+            {view === 'multicam' && <MultiCamera onTrack={track} />}
             {view === 'live' && <Live onTrack={track} />}
             {view === 'map' && <GisMap onTrack={track} />}
             {view === 'track' && <TrackVehicle initialPlate={plate} />}
