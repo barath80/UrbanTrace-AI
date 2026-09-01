@@ -1,7 +1,17 @@
 """Plate OCR engine.
 
-Primary engine: fast-plate-ocr `cct-s-v2-global-model` (CCT transformer trained
+Primary engine: fast-plate-ocr `cct-xs-v2-global-model` (CCT transformer trained
 on global plates), executed on GPU via onnxruntime.
+
+Chosen by measurement, not by size. On the 80 hand-transcribed plates in
+`data/datasets/plate_ocr_test_labels.csv` (testing_accuracy.ipynb, section 6.4):
+
+    cct-xs-v2-global-model   71.3% exact plate,  92.2% character accuracy
+    cct-s-v2-global-model    27.5% exact plate,  80.5% character accuracy
+
+The larger `-s` model loses on Indian plates because it stops at nine characters
+where a ten-character plate needs ten; 57 of its 58 errors were readings shorter
+than the truth. Re-run that notebook section before changing this default.
 
 For each detected plate we run OCR over several preprocessing variants and keep
 the highest-confidence reading. Confidence is the mean per-character
@@ -38,8 +48,12 @@ class OCRResult:
         return asdict(self)
 
 
+#: Default recogniser. See the module docstring for the measurement behind it.
+DEFAULT_MODEL = "cct-xs-v2-global-model"
+
+
 @lru_cache(maxsize=2)
-def _load(model_name: str = "cct-s-v2-global-model"):
+def _load(model_name: str = DEFAULT_MODEL):
     enable_gpu_dlls()          # must precede onnxruntime session creation
     from fast_plate_ocr import LicensePlateRecognizer
     return LicensePlateRecognizer(
@@ -66,7 +80,7 @@ def _score(pred, text: str) -> tuple[float, float, list]:
 class PlateOCR:
     """Runs OCR across preprocessing variants and returns the best reading."""
 
-    def __init__(self, model_name: str = "cct-s-v2-global-model",
+    def __init__(self, model_name: str = DEFAULT_MODEL,
                  variants=pp.DEFAULT_VARIANTS, consensus: bool = True):
         self.model_name = model_name
         self.variants = tuple(variants)

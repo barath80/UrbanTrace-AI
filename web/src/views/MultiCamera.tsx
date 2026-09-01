@@ -30,6 +30,7 @@ import {
   type MultiCamVehicle,
 } from '../api'
 import CityMap, { type FlowLine } from '../components/CityMap'
+import QRCode from '../components/QRCode'
 import { Empty, Panel, num, verdictKind } from '../components/ui'
 
 const CAMERA_IDS = ['CAM_001', 'CAM_002', 'CAM_003']
@@ -248,15 +249,26 @@ export default function MultiCamera({ onTrack }: { onTrack?: (plate: string) => 
         <Panel title="Connecting the three phones">
           <ol className="mc-steps">
             <li>Put the three phones and this laptop on the same Wi-Fi network or laptop hotspot.</li>
-            <li>Open the address below in the browser on each phone — one address per phone.</li>
+            <li>
+              Point each phone camera at one of the codes below, or type the address into the
+              phone browser — one code per phone.
+            </li>
             <li>On each phone, choose a stored video file. It plays in a loop and streams here until you stop it.</li>
           </ol>
 
           <div className="mc-url-list">
             {CAMERA_IDS.map((id, i) => (
               <div key={id} className="mc-url-row">
-                <span className="mc-url-label">Phone {i + 1} · {id}</span>
-                <code className="mono mc-url">{phoneUrl(id)}</code>
+                <QRCode
+                  value={phoneUrl(id)}
+                  size={116}
+                  label={`Scan to open the Phone ${i + 1} streamer for ${id}`}
+                  className="mc-qr"
+                />
+                <div className="mc-url-body">
+                  <span className="mc-url-label">Phone {i + 1} · {id}</span>
+                  <code className="mono mc-url">{phoneUrl(id)}</code>
+                </div>
                 <button className="btn btn-sm ghost" onClick={() => copy(phoneUrl(id), id)}>
                   {copied === id ? 'Copied' : 'Copy'}
                 </button>
@@ -338,8 +350,14 @@ export default function MultiCamera({ onTrack }: { onTrack?: (plate: string) => 
                   <div className="mc-screen-idle">
                     <p className="mc-idle-title">{STATUS_TEXT[cam.status] ?? cam.status}</p>
                     <p className="mc-idle-sub">
-                      {cam.error_message ?? `Open the Phone ${i + 1} address on a phone, or start from a local video.`}
+                      {cam.error_message ?? `Scan this code with Phone ${i + 1} to stream a video from it, or start from a local video.`}
                     </p>
+                    <QRCode
+                      value={phoneUrl(cam.camera_id)}
+                      size={124}
+                      label={`Scan to open the Phone ${i + 1} streamer for ${cam.camera_id}`}
+                      className="mc-idle-qr"
+                    />
                     <button
                       className="btn btn-sm"
                       disabled={busy}
@@ -358,10 +376,20 @@ export default function MultiCamera({ onTrack }: { onTrack?: (plate: string) => 
                 <div><dt>Plates</dt><dd className="mono">{num(cam.plates_detected_count ?? 0)}</dd></div>
               </dl>
 
+              {(cam.detect_failures ?? 0) > 0 && (
+                <p className="mc-detect-warn">
+                  Detection failed {num(cam.detect_failures ?? 0)}× on this feed
+                  {cam.last_detect_error ? ` — ${cam.last_detect_error}` : ''}. Plate boxes
+                  on this camera are incomplete.
+                </p>
+              )}
+
               <footer className="mc-card-foot">
                 <button
                   className="btn btn-sm ghost"
-                  disabled={busy || !playing}
+                  /* Always clickable: a feed reporting a stale "playing" status
+                     is exactly when an operator most needs to stop it. */
+                  disabled={busy}
                   onClick={() => run(`Stop ${cam.camera_id}`, () => stopMultiCamStream(cam.camera_id))}
                 >
                   Stop
@@ -501,6 +529,7 @@ export default function MultiCamera({ onTrack }: { onTrack?: (plate: string) => 
           <CityMap
             cameras={mapCameras}
             heat={heat}
+            heatScale="count"
             flows={flows}
             showHeat={heat.length > 0}
             showFlows={flows.length > 0}

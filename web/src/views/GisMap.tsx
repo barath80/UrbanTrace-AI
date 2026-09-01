@@ -223,7 +223,8 @@ export default function GisMap({ onTrack }: { onTrack: (plate: string) => void }
         </aside>
 
         <CityMap
-          cameras={cameras} heat={heat} flows={flowLines} route={route}
+          cameras={cameras} heat={heat} heatScale="count"
+          flows={flowLines} route={route}
           showHeat={showHeat} showFlows={showFlows} showCameras={showCameras}
           pitch={pitch} className="map-canvas tall"
         />

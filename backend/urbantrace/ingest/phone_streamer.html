@@ -373,6 +373,7 @@
     let isStreamStopped = false;
     let wakeLock = null;
     let isEncoding = false;
+    let uploadInFlight = false;
     let encodeSeq = 0;
 
     function setCamera(camId) {
@@ -410,6 +411,19 @@
         }
         ws = new WebSocket(wsUrl);
         ws.binaryType = 'blob';
+
+        // The dashboard's Stop button is authoritative. When it stops a feed the
+        // laptop replies "stopped", and the phone must stop encoding and
+        // uploading - otherwise it burns battery pushing frames that are dropped.
+        ws.onmessage = (ev) => {
+          if (typeof ev.data !== 'string') return;
+          let msg;
+          try { msg = JSON.parse(ev.data); } catch (e) { return; }
+          if (msg.type === 'stopped' && !isStreamStopped) {
+            stopStream();
+            updateStatus('warn', 'Stopped from the laptop dashboard');
+          }
+        };
 
         ws.onopen = () => {
           console.log('WebSocket Connected to laptop for ' + currentCam);
@@ -538,15 +552,25 @@
     }
 
     function sendFrameHttp(blob) {
+      uploadInFlight = true;
       fetch(`/api/multi-camera/ingest/${currentCam}`, {
         method: 'POST',
         headers: { 'Content-Type': 'image/jpeg' },
         body: blob
+      }).then((r) => {
+        // Same rule as the WebSocket path: the laptop can stop this feed.
+        r.clone().json().then((j) => {
+          if (j && j.status === 'stopped' && !isStreamStopped) {
+            stopStream();
+            updateStatus('warn', 'Stopped from the laptop dashboard');
+          }
+        }).catch(() => {});
+        return r;
       }).then(() => {
         framesSent++;
         framesThisSec++;
         framesVal.textContent = framesSent;
-      }).catch(() => {});
+      }).catch(() => {}).finally(() => { uploadInFlight = false; });
     }
 
     function startStreaming() {
@@ -564,7 +588,11 @@
       canvas.height = targetHeight;
 
       if (streamInterval) clearInterval(streamInterval);
-      const frameIntervalMs = 33; // 30 FPS playback
+      // 12 fps, not 30. ANPR needs a handful of good frames per vehicle, and the
+      // laptop runs vehicle detection + plate detection + OCR on each one. At 30
+      // fps the phone offered frames far faster than they could be consumed, so
+      // they piled up as parallel uploads and starved every other API call.
+      const frameIntervalMs = 83;
 
       streamInterval = setInterval(() => {
         if (isStreamStopped) return;
@@ -574,7 +602,9 @@
           video.play().catch(() => {});
         }
 
-        if (isEncoding || !video.videoWidth) return;
+        // One upload in flight at a time. Without this the encode finishes,
+        // the next tick fires, and uploads stack up on separate sockets.
+        if (isEncoding || uploadInFlight || !video.videoWidth) return;
 
         isEncoding = true;
         try {
@@ -585,6 +615,9 @@
 
             if (ws && ws.readyState === WebSocket.OPEN) {
               try {
+                // bufferedAmount rising means the socket is not draining as
+                // fast as we fill it; skip this frame rather than queue it.
+                if (ws.bufferedAmount > 512 * 1024) return;
                 ws.send(blob);
                 framesSent++;
                 framesThisSec++;

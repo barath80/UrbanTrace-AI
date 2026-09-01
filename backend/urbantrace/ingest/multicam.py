@@ -32,6 +32,7 @@ from typing import Dict, Optional
 import cv2
 import numpy as np
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from ..vision.aggregate import Reading, aggregate
@@ -177,6 +178,18 @@ class CameraSlot:
         self._ocr = None
         self.anpr_enabled = True
         self.detect_every = 2  # Run detection on keyframes for smooth 30 FPS playback
+        # One frame in flight per camera. Inference costs tens of milliseconds;
+        # a phone streaming at 30 fps offers frames far faster than that, and
+        # queueing them would grow an unbounded backlog of stale frames. ANPR
+        # needs a few good frames per vehicle, not every frame, so the honest
+        # response to a busy slot is to drop.
+        self._processing = threading.Lock()
+        self.detections_skipped = 0     # frames shown without fresh detection
+        self.detect_failures = 0        # detection exceptions, reported in status
+        self.last_detect_error: str | None = None
+        # Latched by stop_stream(); until it clears, inbound phone frames are
+        # dropped instead of restarting the feed.
+        self.stopped_by_user = False
 
         # Detection cache & stats
         self.active_tracks: list = []
@@ -306,14 +319,22 @@ class CameraSlot:
         never bring the feed back -- the WebSocket was still open, so nothing
         reconnected and the slot stayed dark.
         """
+        self.stopped_by_user = False
         self._stop_event.clear()
         if self.status == "stopped":
             self.status = "waiting"
             self.error_message = None
 
-    def update_frame(self, frame_bgr: np.ndarray, video_time_s: float = 0.0, video_name: str = ""):
-        """Process frame: run YOLO + Plate + OCR detection and render live overlays."""
-        if self.status == "stopped":
+    def update_frame(self, frame_bgr: np.ndarray, video_time_s: float = 0.0, video_name: str = "",
+                     detect: bool = True):
+        """Process frame: run YOLO + Plate + OCR detection and render live overlays.
+
+        Frames are refused on `stopped_by_user`, not on `status`: this method
+        sets `status = "playing"` a few lines down, so a frame that was already
+        being processed when Stop arrived would set the feed running again. The
+        latch only clears on an explicit Start or Resume.
+        """
+        if self.stopped_by_user or self.status == "stopped":
             return
 
         h, w = frame_bgr.shape[:2]
@@ -330,11 +351,14 @@ class CameraSlot:
                 self.fps = 0.85 * self.fps + 0.15 * inst_fps if self.fps > 0 else inst_fps
         self.last_received_at = now
         self.frame_count += 1
+        if self.stopped_by_user:
+            return
         self.status = "playing"
         self.error_message = None
 
         # Run AI detection on keyframes
-        if self.anpr_enabled and (self.frame_count % self.detect_every == 0 or len(self.active_tracks) == 0):
+        if detect and self.anpr_enabled and (self.frame_count % self.detect_every == 0
+                                             or len(self.active_tracks) == 0):
             self._ensure_models()
             if self._tracker and self._plates:
                 try:
@@ -353,7 +377,13 @@ class CameraSlot:
                             continue
                         buf = self.readings.setdefault(tid, [])
                         if len(buf) < 6:
-                            crop = crop_with_margin(frame_bgr, plate.box, margin=0.15)
+                            # No margin override. Measured on the 80 labelled
+                            # test plates (testing_accuracy.ipynb): reading the
+                            # detector's box with a 0.15 margin scores 0.613
+                            # exact against 0.750 with none. The detector box
+                            # already carries context; padding it adds
+                            # background the recogniser has to discount.
+                            crop = crop_with_margin(frame_bgr, plate.box)
                             if crop is not None and self._ocr is not None:
                                 res = self._ocr.read(crop)
                                 if res and res.text_final:
@@ -385,7 +415,14 @@ class CameraSlot:
                                             self.best_label[tid] = agg.plate
                                             self._publish(agg, track, tid)
                 except Exception as e:
-                    logger.debug(f"Detection error: {e}")
+                    # Counted and surfaced, never swallowed: a feed reading zero
+                    # plates must be able to say whether the road was empty or
+                    # the detector was failing on every frame.
+                    self.detect_failures += 1
+                    self.last_detect_error = f"{type(e).__name__}: {e}"
+                    if self.detect_failures in (1, 10, 100) or self.detect_failures % 500 == 0:
+                        logger.warning("%s detection failed %dx (latest: %s)",
+                                       self.camera_id, self.detect_failures, self.last_detect_error)
 
         # Render overlays onto frame
         annotated = self._draw_overlays(frame_bgr)
@@ -395,16 +432,45 @@ class CameraSlot:
                 self.latest_jpeg = buf.tobytes()
                 self._new_frame_event.notify_all()
 
-    def update_jpeg(self, jpeg_bytes: bytes, video_time_s: float = 0.0, video_name: str = ""):
+    def submit_jpeg(self, jpeg_bytes: bytes, video_time_s: float = 0.0, video_name: str = "") -> bool:
+        """Take a phone frame: always display it, detect on it only when free.
+
+        Display and inference are deliberately separated. Showing a frame costs
+        a JPEG decode; detecting on one costs vehicle detection, plate detection
+        and OCR, which is orders of magnitude slower. Gating both on the same
+        lock made the video freeze whenever the GPU was busy. So every frame
+        reaches the operator's screen, and detection runs on whichever frames
+        the GPU can actually take - the last known boxes stay drawn in between.
+
+        MUST be called off the event loop. Returns True if this frame was
+        detected on, False if it was shown without fresh detection.
+        """
+        if self.stopped_by_user or self.status == "stopped":
+            return False
+        if self._processing.acquire(blocking=False):
+            try:
+                self.update_jpeg(jpeg_bytes, video_time_s=video_time_s, video_name=video_name)
+                return True
+            finally:
+                self._processing.release()
+
+        self.detections_skipped += 1
+        self.update_jpeg(jpeg_bytes, video_time_s=video_time_s,
+                         video_name=video_name, detect=False)
+        return False
+
+    def update_jpeg(self, jpeg_bytes: bytes, video_time_s: float = 0.0, video_name: str = "",
+                    detect: bool = True):
         """Decode incoming phone JPEG, run detection, render overlays, and stream."""
-        if self.status == "stopped":
+        if self.stopped_by_user or self.status == "stopped":
             return
 
         try:
             arr = np.frombuffer(jpeg_bytes, np.uint8)
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if frame is not None:
-                self.update_frame(frame, video_time_s=video_time_s, video_name=video_name)
+                self.update_frame(frame, video_time_s=video_time_s,
+                                  video_name=video_name, detect=detect)
                 return
         except Exception:
             pass
@@ -437,6 +503,7 @@ class CameraSlot:
     def start_url_stream(self, url: str, video_name: str = ""):
         """Start background worker to ingest from network stream URL with continuous auto-loop."""
         self.stop_stream()
+        self.stopped_by_user = False
         self._stop_event.clear()
         self.source_type = "network_url"
         self.source_label = url
@@ -452,6 +519,7 @@ class CameraSlot:
     def start_local_file_stream(self, file_path: Path):
         """Start background worker to stream local video file with seamless continuous auto-looping."""
         self.stop_stream()
+        self.stopped_by_user = False
         self._stop_event.clear()
         self.source_type = "local_file"
         self.source_label = file_path.name
@@ -465,7 +533,13 @@ class CameraSlot:
         self._worker_thread.start()
 
     def stop_stream(self):
-        """Stop running worker thread or phone connection cleanly."""
+        """Stop running worker thread or phone connection cleanly.
+
+        Sets `stopped_by_user`, which the phone-ingest handlers check before
+        accepting a frame. Without that latch a connected phone simply kept
+        pushing frames and the feed restarted itself.
+        """
+        self.stopped_by_user = True
         self._stop_event.set()
         worker, self._worker_thread = self._worker_thread, None
         if worker and worker.is_alive() and worker is not threading.current_thread():
@@ -496,7 +570,7 @@ class CameraSlot:
     def _run_url_capture(self, url: str):
         """Worker loop for network URL streams with auto-reconnect/loop."""
         logger.info(f"Starting URL stream for {self.camera_id}: {url}")
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and not self.stopped_by_user:
             cap = cv2.VideoCapture(url)
             if not cap.isOpened():
                 self.status = "disconnected"
@@ -508,7 +582,7 @@ class CameraSlot:
             fps_src = cap.get(cv2.CAP_PROP_FPS) or 25.0
             frame_period = 1.0 / fps_src if fps_src > 0 else 0.033
 
-            while not self._stop_event.is_set():
+            while not self._stop_event.is_set() and not self.stopped_by_user:
                 t0 = time.time()
                 ok, frame = cap.read()
                 if not ok:
@@ -528,7 +602,7 @@ class CameraSlot:
     def _run_file_capture(self, filepath: str):
         """Worker loop for video file with seamless continuous looping."""
         logger.info(f"Starting file stream for {self.camera_id}: {filepath}")
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and not self.stopped_by_user:
             cap = cv2.VideoCapture(filepath)
             if not cap.isOpened():
                 self.status = "error"
@@ -538,7 +612,7 @@ class CameraSlot:
             fps_src = cap.get(cv2.CAP_PROP_FPS) or 25.0
             frame_period = 1.0 / fps_src if fps_src > 0 else 0.033
 
-            while not self._stop_event.is_set():
+            while not self._stop_event.is_set() and not self.stopped_by_user:
                 t0 = time.time()
                 ok, frame = cap.read()
                 if not ok:
@@ -584,6 +658,10 @@ class CameraSlot:
             "anpr_enabled": self.anpr_enabled,
             "plates_detected_count": len(self.published_tracks),
             "recent_plates": list(self.recent_plates)[:5],
+            "active_plate_boxes": len(self.active_plates),
+            "detections_skipped": self.detections_skipped,
+            "detect_failures": self.detect_failures,
+            "last_detect_error": self.last_detect_error,
         }
 
 
@@ -823,24 +901,43 @@ async def ws_camera_ingest(websocket: WebSocket, camera_id: str):
     try:
         while True:
             msg = await websocket.receive()
+
+            # A frame must never revive a feed the operator stopped. `resume()`
+            # used to run on every inbound frame, so pressing Stop in the
+            # dashboard was undone by the very next frame the phone sent and the
+            # feed never actually stopped. Only an explicit resume restarts it;
+            # while stopped, frames are dropped and the phone is told to stand
+            # down so it is not encoding and uploading into a void.
+            if slot.stopped_by_user:
+                if "bytes" in msg or "text" in msg:
+                    try:
+                        await websocket.send_text(json.dumps({"type": "stopped"}))
+                    except Exception:
+                        pass
+                    if "text" in msg and msg["text"]:
+                        try:
+                            if json.loads(msg["text"]).get("type") == "resume":
+                                slot.resume()
+                        except Exception:
+                            pass
+                continue
+
             if "bytes" in msg and msg["bytes"]:
-                slot.resume()
-                slot.update_jpeg(msg["bytes"])
+                await run_in_threadpool(slot.submit_jpeg, msg["bytes"])
             elif "text" in msg and msg["text"]:
                 data = json.loads(msg["text"])
                 msg_type = data.get("type")
                 if msg_type == "resume":
                     slot.resume()
                 elif msg_type == "frame":
-                    slot.resume()
                     frame_b64 = data.get("data", "")
                     if "," in frame_b64:
                         frame_b64 = frame_b64.split(",", 1)[1]
                     raw = base64.b64decode(frame_b64)
-                    slot.update_jpeg(
-                        raw,
-                        video_time_s=float(data.get("time", 0.0)),
-                        video_name=data.get("video_name", ""),
+                    await run_in_threadpool(
+                        slot.submit_jpeg, raw,
+                        float(data.get("time", 0.0)),
+                        data.get("video_name", ""),
                     )
                 elif msg_type == "meta":
                     if data.get("video_name"):
@@ -872,26 +969,31 @@ async def http_camera_ingest(camera_id: str, request: Request):
     if not slot:
         raise HTTPException(404, f"Unknown camera {camera_id}")
 
+    if slot.stopped_by_user:
+        # Same rule as the WebSocket path: a stopped feed stays stopped, and the
+        # phone is told so it can stop uploading.
+        return {"status": "stopped", "camera_id": camera_id}
+
     content_type = request.headers.get("content-type", "")
     slot.source_type = "phone_web"
     slot.source_label = "Android Phone (HTTP Ingest)"
 
     if "image/jpeg" in content_type or "application/octet-stream" in content_type:
         body = await request.body()
-        slot.update_jpeg(body)
-        return {"status": "ok", "camera_id": camera_id}
+        accepted = await run_in_threadpool(slot.submit_jpeg, body)
+        return {"status": "ok" if accepted else "busy", "camera_id": camera_id}
     else:
         payload = await request.json()
         frame_b64 = payload.get("data", "")
         if "," in frame_b64:
             frame_b64 = frame_b64.split(",", 1)[1]
         raw = base64.b64decode(frame_b64)
-        slot.update_jpeg(
-            raw,
-            video_time_s=float(payload.get("time", 0.0)),
-            video_name=payload.get("video_name", ""),
+        accepted = await run_in_threadpool(
+            slot.submit_jpeg, raw,
+            float(payload.get("time", 0.0)),
+            payload.get("video_name", ""),
         )
-        return {"status": "ok", "camera_id": camera_id}
+        return {"status": "ok" if accepted else "busy", "camera_id": camera_id}
 
 
 # ------------------------------------------------------------- Stream & Status

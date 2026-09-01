@@ -181,6 +181,7 @@ export default function CityNetwork() {
             <CityMap
               cameras={mapCameras}
               heat={heat}
+              heatScale="count"
               flows={flowLines}
               showHeat
               showFlows={flowLines.length > 0}

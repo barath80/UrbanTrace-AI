@@ -7,9 +7,10 @@ import {
 } from 'recharts'
 
 import {
-  getFlows, getTimeline, getVehicleCounts, getVehicleTypes,
-  type Flow, type TimelineBucket,
+  getCameras, getFlows, getHeatmap, getTimeline, getVehicleCounts, getVehicleTypes,
+  type Camera, type Flow, type HeatPoint, type TimelineBucket,
 } from '../api'
+import CityMap from '../components/CityMap'
 import { Empty, Loading, Panel, num } from '../components/ui'
 
 const CLASS_COLOR: Record<string, string> = {
@@ -28,11 +29,17 @@ export default function Analytics() {
   const [types, setTypes] = useState<Record<string, unknown>[]>([])
   const [timeline, setTimeline] = useState<TimelineBucket[]>([])
   const [flows, setFlows] = useState<Flow[]>([])
+  const [heat, setHeat] = useState<HeatPoint[]>([])
+  const [cameras, setCameras] = useState<Camera[]>([])
   const [busy, setBusy] = useState(true)
 
   useEffect(() => {
-    Promise.all([getVehicleCounts(), getVehicleTypes(), getTimeline(), getFlows()])
-      .then(([c, t, tl, f]) => { setCounts(c); setTypes(t); setTimeline(tl); setFlows(f) })
+    Promise.all([getVehicleCounts(), getVehicleTypes(), getTimeline(), getFlows(),
+                 getHeatmap(), getCameras()])
+      .then(([c, t, tl, f, h, cams]) => {
+        setCounts(c); setTypes(t); setTimeline(tl); setFlows(f)
+        setHeat(h); setCameras(cams)
+      })
       .catch(() => { /* empty state below */ })
       .finally(() => setBusy(false))
   }, [])
@@ -64,6 +71,28 @@ export default function Analytics() {
 
   return (
     <>
+      <Panel
+        title="Traffic density heatmap"
+        hint={
+          <span className="hint-text">
+            Where plates were actually read. Intensity is each camera's share of
+            the busiest node, on a square-root scale so a single very busy
+            junction does not flatten the rest.
+          </span>
+        }
+      >
+        {heat.length === 0 ? (
+          <Empty title="No detections to map">
+            Process videos so the network has sightings to plot.
+          </Empty>
+        ) : (
+          <div className="net-map">
+            <CityMap cameras={cameras} heat={heat} heatScale="count"
+                     showHeat showCameras showFlows={false} pitch={0} />
+          </div>
+        )}
+      </Panel>
+
       <div className="grid grid-2">
         <Panel title="Unique vehicles by class, per camera"
                hint="deduped tracks, not frame detections">

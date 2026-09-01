@@ -68,7 +68,6 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }, [])
 
-  const db = health?.database
   const rt = health?.runtime
 
   return (
@@ -82,15 +81,9 @@ export default function App() {
           </div>
         </div>
         <div className="chips">
-          {/* Shown only when connected. Each view already reports its own
-              empty state, so a persistent offline banner adds nothing.
-              /api/health still carries the real status. */}
-          {db?.connected && (
-            <span className="chip">
-              <span className="dot ok" />
-              Supabase · {db.public_tables ?? '?'} tables
-            </span>
-          )}
+          {/* Database status is not surfaced here: each view reports its own
+              empty state, and /api/health still carries the real status for
+              anyone who needs it. */}
           <span className="chip hide-sm">
             <span className={`dot ${rt?.cuda ? 'ok' : ''}`} />
             {rt?.gpu_name ?? rt?.device ?? '—'}

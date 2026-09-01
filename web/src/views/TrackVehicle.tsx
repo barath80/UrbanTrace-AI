@@ -176,6 +176,7 @@ function Dossierview({ d, route }: { d: Dossier; route: RouteLine | null }) {
         <CityMap
           cameras={[]}
           heat={d.heat}
+          heatScale="unit"
           route={route}
           showHeat
           showFlows={false}

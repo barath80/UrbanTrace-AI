@@ -250,6 +250,11 @@ export interface MultiCamSlot {
   has_feed: boolean
   error_message: string | null
   plates_detected_count?: number
+  /** Plate boxes drawn on the current frame. */
+  active_plate_boxes?: number
+  /** Detection exceptions since the feed started; > 0 means readings are being lost. */
+  detect_failures?: number
+  last_detect_error?: string | null
 }
 
 export interface MultiCamDetection {
@@ -482,13 +487,29 @@ export interface NetLeg {
   reason: string
 }
 
+/** A gap too long to be one continuous journey. */
+export interface NetBreak {
+  after_camera: string
+  before_camera: string
+  left_at: string
+  returned_at: string
+  gap_minutes: number
+  reason: string
+}
+
 export interface NetTrajectory {
   plate: string
   sightings: NetSighting[]
   legs: NetLeg[]
+  breaks: NetBreak[]
+  journeys: number
   cameras: number
   first_seen: string | null
   last_seen: string | null
+  /** Time actually spent travelling, summed over real legs. */
+  travelling_minutes: number | null
+  /** Wall-clock window the sightings span, which includes any breaks. */
+  observed_span_minutes: number | null
   spellings: string[]
   window_hours: number
 }

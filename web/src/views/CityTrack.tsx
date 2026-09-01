@@ -94,10 +94,13 @@ export default function CityTrack({ initialPlate }: { initialPlate?: string } = 
     count_car: 0, count_motorcycle: 0, count_bus: 0, count_truck: 0,
   }))
 
-  const durationMin = trajectory?.first_seen && trajectory?.last_seen
-    ? (new Date(trajectory.last_seen).getTime() -
-       new Date(trajectory.first_seen).getTime()) / 60000
-    : null
+  // Time spent TRAVELLING, not last-seen minus first-seen. The two differ
+  // whenever the vehicle was out of sight long enough to break the journey,
+  // and reporting the span as a duration turns two separate trips into one
+  // impossibly slow one.
+  const durationMin = trajectory?.travelling_minutes ?? null
+  const spanMin = trajectory?.observed_span_minutes ?? null
+  const breaks = trajectory?.breaks ?? []
 
   const speeds = (trajectory?.legs ?? [])
     .map(l => l.implied_speed_kmh).filter((v): v is number => v != null)
@@ -167,11 +170,23 @@ export default function CityTrack({ initialPlate }: { initialPlate?: string } = 
             <div className="tiles">
               <Tile label="Cameras" value={trajectory.cameras} sub="nodes that saw it" />
               <Tile label="Sightings" value={sightings.length} sub="confirmed reads" accent="var(--s1)" />
-              <Tile label="Duration" value={durationMin} decimals={1} sub="minutes, first to last" />
+              <Tile label="Travelling time" value={durationMin} decimals={1}
+                    sub="minutes, summed over legs" />
+              <Tile label="Journeys" value={trajectory.journeys}
+                    sub={breaks.length > 0 ? `${breaks.length} break(s) in between` : 'one continuous trip'}
+                    accent={breaks.length > 0 ? 'var(--warning)' : undefined} />
               <Tile label="Distance" value={distance || null} decimals={2}
                     sub="km, straight-line estimate" />
               <Tile label="Mean speed" value={meanSpeed} decimals={1} sub="km/h between cameras" />
             </div>
+            {spanMin != null && durationMin != null && spanMin > durationMin * 1.05 && (
+              <p className="net-note">
+                Seen over a {num(spanMin / 60, 1)} h window but only{' '}
+                {num(durationMin, 1)} min of that was measured travel. The rest is
+                time the vehicle spent out of sight between separate trips, and is
+                deliberately not counted as journey time.
+              </p>
+            )}
             {trajectory.spellings.length > 1 && (
               <p className="net-note">
                 Merged OCR spellings:{' '}
@@ -227,6 +242,24 @@ export default function CityTrack({ initialPlate }: { initialPlate?: string } = 
               </table>
             </div>
           </Panel>
+
+          {breaks.length > 0 && (
+            <Panel title="Journey breaks"
+                   hint={<span className="hint-text">
+                     Gaps too long to be one continuous trip
+                   </span>}>
+              <ul className="mc-legs">
+                {breaks.map((b, i) => (
+                  <li key={i}>
+                    <span className="mono">{b.after_camera} → {b.before_camera}</span>
+                    <span className="mono">{num(b.gap_minutes / 60, 1)} h out of sight</span>
+                    <span className="badge warn">SEPARATE JOURNEY</span>
+                    <span className="mc-leg-note">{b.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            </Panel>
+          )}
 
           {trajectory.legs.length > 0 && (
             <Panel title="Movement between cameras"

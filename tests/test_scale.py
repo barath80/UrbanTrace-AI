@@ -342,3 +342,130 @@ def test_admission_rate_limits_per_camera():
     assert not bus.admit("CAM_A", now=100.01)     # inside the 0.1s period
     assert bus.admit("CAM_A", now=100.2)
     assert bus.admit("CAM_B", now=100.01)         # a different camera is unaffected
+
+
+# ------------------------------------------------- leg / journey continuity
+# These pin the edge cases in speed measurement between sparse cameras. Each
+# one produced a wrong number on real data before it was guarded.
+
+def _leg_registry():
+    reg = CameraRegistry(cell_km=5.0)
+    reg.load([
+        {"camera_id": "CAM_A", "name": "A", "latitude": 13.0694, "longitude": 80.1948},
+        {"camera_id": "CAM_B", "name": "B", "latitude": 13.1143, "longitude": 80.1548},
+    ])
+    reg.build_graph()
+    return reg
+
+
+def _sight(cam, minutes, lat, lon):
+    return {"camera_id": cam, "observed_at": T0 + timedelta(minutes=minutes),
+            "latitude": lat, "longitude": lon, "plate": "TN01AB1234"}
+
+
+def _pair(minutes):
+    return (_sight("CAM_A", 0, 13.0694, 80.1948),
+            _sight("CAM_B", minutes, 13.1143, 80.1548))
+
+
+def test_leg_rejects_zero_and_negative_time():
+    """E6: simultaneous or out-of-order sightings must not divide by zero."""
+    from urbantrace.scale.analytics import _leg
+    reg = _leg_registry()
+    for minutes in (0.0, -5.0):
+        a, b = _pair(minutes)
+        leg = _leg(a, b, reg)
+        assert leg["verdict"] == "IMPLAUSIBLE"
+        # A missing measurement, never a measured zero.
+        assert leg["implied_speed_kmh"] is None
+
+
+def test_leg_flags_physically_impossible_speed():
+    """E8: the same plate in two places at once means a clone or a misread."""
+    from urbantrace.scale.analytics import _leg
+    reg = _leg_registry()
+    a, b = _pair(1.0)                      # ~8 km in 1 minute
+    leg = _leg(a, b, reg)
+    assert leg["verdict"] == "IMPLAUSIBLE"
+    assert leg["implied_speed_kmh"] > 140
+
+
+def test_leg_flags_slow_but_still_possible():
+    """A genuinely slow crossing is SLOW, not impossible."""
+    from urbantrace.scale.analytics import _leg
+    reg = _leg_registry()
+    a, b = _pair(45.0)
+    leg = _leg(a, b, reg)
+    assert leg["verdict"] == "SLOW"
+    assert 0 < leg["implied_speed_kmh"] < 30
+
+
+def test_normal_crossing_is_plausible():
+    from urbantrace.scale.analytics import _leg
+    reg = _leg_registry()
+    a, b = _pair(14.0)
+    leg = _leg(a, b, reg)
+    assert leg["verdict"] == "PLAUSIBLE"
+    assert 25 < leg["implied_speed_kmh"] < 50
+
+
+def test_long_gap_becomes_a_break_not_a_leg(monkeypatch):
+    """E9: a vehicle seen days apart made two trips, not one four-day crawl.
+
+    Before this guard the pair produced a SLOW leg at 0.1 km/h which was
+    averaged into the origin-destination matrix and the congestion baseline.
+    """
+    import urbantrace.scale.analytics as A
+    reg = _leg_registry()
+    monkeypatch.setattr(A, "REGISTRY", reg, raising=False)
+    monkeypatch.setitem(sys.modules, "urbantrace.scale.registry",
+                        sys.modules["urbantrace.scale.registry"])
+    sys.modules["urbantrace.scale.registry"].REGISTRY = reg
+
+    sightings = [_sight("CAM_A", 0, 13.0694, 80.1948),
+                 _sight("CAM_B", 4 * 24 * 60, 13.1143, 80.1548)]
+    legs, breaks = A._legs_from(sightings)
+    assert legs == []
+    assert len(breaks) == 1
+    assert breaks[0]["after_camera"] == "CAM_A"
+    assert breaks[0]["before_camera"] == "CAM_B"
+    assert breaks[0]["gap_minutes"] == pytest.approx(5760.0)
+
+
+def test_short_gap_still_produces_a_leg(monkeypatch):
+    import urbantrace.scale.analytics as A
+    reg = _leg_registry()
+    sys.modules["urbantrace.scale.registry"].REGISTRY = reg
+    sightings = [_sight("CAM_A", 0, 13.0694, 80.1948),
+                 _sight("CAM_B", 14, 13.1143, 80.1548)]
+    legs, breaks = A._legs_from(sightings)
+    assert len(legs) == 1
+    assert breaks == []
+
+
+def test_same_camera_repeats_produce_no_leg(monkeypatch):
+    """E7: a vehicle idling in view is not a zero-kilometre journey."""
+    import urbantrace.scale.analytics as A
+    sys.modules["urbantrace.scale.registry"].REGISTRY = _leg_registry()
+    sightings = [_sight("CAM_A", m, 13.0694, 80.1948) for m in (0, 1, 2, 3)]
+    legs, breaks = A._legs_from(sightings)
+    assert legs == []
+    assert breaks == []
+
+
+def test_service_does_not_write_over_gap_legs():
+    """The live path must not persist a leg it would have to exclude later."""
+    from urbantrace.scale.identity import Cluster
+    from urbantrace.scale.service import IngestService
+
+    svc = IngestService(registry=_leg_registry(), persist=False)
+    c = Cluster(cluster_id="GV_TEST", plate="TN01AB1234")
+    c.sightings = [
+        sighting("TN01AB1234", "CAM_A", 0, track=1, lat=13.0694, lon=80.1948),
+        sighting("TN01AB1234", "CAM_B", 4 * 24 * 60, track=2, lat=13.1143, lon=80.1548),
+    ]
+    assert svc._legs_for(c) == []
+
+    c.sightings[1] = sighting("TN01AB1234", "CAM_B", 14, track=2,
+                              lat=13.1143, lon=80.1548)
+    assert len(svc._legs_for(c)) == 1

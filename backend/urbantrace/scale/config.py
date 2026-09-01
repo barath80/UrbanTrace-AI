@@ -88,6 +88,12 @@ class ScaleSettings:
     identity_ttl_minutes: float = field(default_factory=lambda: _f("UT_IDENTITY_TTL_MIN", 720.0))
 
     # ---- spatio-temporal validation --------------------------------
+    # Two sightings separated by more than this are NOT one continuous journey.
+    # Without this bound a vehicle seen on Monday and again on Friday produces a
+    # single four-day "leg" at 0.1 km/h, which is then averaged into the
+    # origin-destination matrix and the congestion baseline and destroys both.
+    # The vehicle did not crawl for four days; it made two separate trips.
+    max_leg_gap_minutes: float = field(default_factory=lambda: _f("UT_MAX_LEG_GAP_MIN", 90.0))
     max_plausible_speed_kmh: float = field(default_factory=lambda: _f("UT_MAX_SPEED", 140.0))
     warn_speed_kmh: float = field(default_factory=lambda: _f("UT_WARN_SPEED", 100.0))
     road_factor: float = field(default_factory=lambda: _f("UT_ROAD_FACTOR", 1.25))

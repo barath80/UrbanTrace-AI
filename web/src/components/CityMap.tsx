@@ -50,6 +50,8 @@ export interface RouteLine {
 export interface CityMapProps {
   cameras?: Camera[]
   heat?: HeatPoint[] | [number, number, number][]
+  /** How to scale heat weights. See HeatScale. Defaults to 'count'. */
+  heatScale?: HeatScale
   flows?: FlowLine[]
   route?: RouteLine | null
   showHeat?: boolean
@@ -64,28 +66,55 @@ export interface CityMapProps {
     puts Chennai in the Indian Ocean, so it happens in exactly one place. */
 const toLngLat = (c: [number, number][]) => c.map(([lat, lon]) => [lon, lat])
 
-function heatFeatures(heat: CityMapProps['heat']): FeatureCollection {
-  const feats: Feature[] = []
+/** How raw weights are mapped onto the 0..1 range the heat layer expects.
+ *
+ *  'count'  - the values are observation COUNTS of unknown range. They are
+ *             normalised against the busiest point and passed through a square
+ *             root, because traffic counts are heavy-tailed: one very busy
+ *             junction would otherwise flatten every other camera to nothing.
+ *  'unit'   - the values are already meaningful in 0..1 and are passed through
+ *             untouched (a single vehicle's own heat surface, for instance,
+ *             where 1.0 means "measured here" and 0.22 means "inferred path").
+ */
+export type HeatScale = 'count' | 'unit'
+
+function heatFeatures(heat: CityMapProps['heat'], scale: HeatScale = 'count'): FeatureCollection {
+  const raw: { lat: number; lon: number; w: number }[] = []
   for (const h of heat ?? []) {
     if (Array.isArray(h)) {
       const [lat, lon, w] = h
-      feats.push({
-        type: 'Feature', properties: { w },
-        geometry: { type: 'Point', coordinates: [lon, lat] },
-      })
+      raw.push({ lat, lon, w: Number(w) || 0 })
     } else {
-      feats.push({
-        type: 'Feature', properties: { w: h.observations || 1 },
-        geometry: { type: 'Point', coordinates: [h.longitude, h.latitude] },
-      })
+      raw.push({ lat: h.latitude, lon: h.longitude, w: Number(h.observations) || 0 })
     }
   }
-  return { type: 'FeatureCollection', features: feats }
+
+  // MapLibre's heatmap-weight is clamped to 0..1. Feeding it raw counts made
+  // every camera saturate at 1, so a node with 400 sightings looked exactly
+  // like one with 1 and the "density" heatmap showed no density at all.
+  let norm = (w: number) => w
+  if (scale === 'count') {
+    const max = Math.max(0, ...raw.map(r => r.w))
+    norm = max > 0
+      // Floor at 0.12 so a camera with any traffic stays visible against one
+      // that is an order of magnitude busier.
+      ? (w: number) => (w <= 0 ? 0 : Math.max(0.12, Math.sqrt(w / max)))
+      : () => 0
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: raw.map(r => ({
+      type: 'Feature',
+      properties: { w: norm(r.w), count: r.w },
+      geometry: { type: 'Point', coordinates: [r.lon, r.lat] },
+    })) as Feature[],
+  }
 }
 
 export default function CityMap({
   cameras = [], heat = [], flows = [], route = null,
-  showHeat = true, showFlows = true, showCameras = true,
+  showHeat = true, showFlows = true, showCameras = true, heatScale = 'count',
   pitch = 45, className = 'map-canvas', onPickCamera,
 }: CityMapProps) {
   const host = useRef<HTMLDivElement>(null)
@@ -135,7 +164,7 @@ export default function CityMap({
         }
       }
 
-      m.addSource('ut-heat', { type: 'geojson', data: heatFeatures([]) })
+      m.addSource('ut-heat', { type: 'geojson', data: heatFeatures([], heatScale) })
       m.addLayer({
         id: 'ut-heat', type: 'heatmap', source: 'ut-heat',
         paint: {
@@ -244,7 +273,7 @@ export default function CityMap({
       // would drop the first paint entirely.
       if (!m.getSource('ut-heat')) return
 
-      ;(m.getSource('ut-heat') as maplibregl.GeoJSONSource).setData(heatFeatures(heat))
+      ;(m.getSource('ut-heat') as maplibregl.GeoJSONSource).setData(heatFeatures(heat, heatScale))
       m.setLayoutProperty('ut-heat', 'visibility', showHeat ? 'visible' : 'none')
 
       ;(m.getSource('ut-flows') as maplibregl.GeoJSONSource).setData({
@@ -330,7 +359,7 @@ export default function CityMap({
 
     draw.current = apply
     if (ready.current) apply()
-  }, [cameras, heat, flows, route, showHeat, showFlows, showCameras, onPickCamera])
+  }, [cameras, heat, flows, route, showHeat, showFlows, showCameras, heatScale, onPickCamera])
 
   useEffect(() => {
     const m = map.current

@@ -483,7 +483,14 @@ button.plate-cell:hover { text-decoration: underline; }
   font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
   color: var(--ink-muted); font-weight: 650; flex: none;
 }
-.mc-url { flex: 1; min-width: 220px; font-size: 12px; color: var(--s1); word-break: break-all; }
+.mc-url { font-size: 12px; color: var(--s1); word-break: break-all; }
+.mc-url-body { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 4px; }
+
+/* A QR code needs a light ground and a little breathing room to scan well. */
+.qr { display: block; border-radius: 4px; background: #fff; }
+.qr-error { font-size: 11px; color: var(--ink-muted); }
+.mc-qr { flex: none; padding: 4px; }
+.mc-idle-qr { margin: 0 auto 12px; padding: 6px; }
 .mc-note { margin-top: 10px; font-size: 12px; color: var(--ink-muted); }
 
 .mc-url-form {
@@ -668,4 +675,10 @@ button.plate-badge-btn:hover { text-decoration: underline; }
     animation-duration: .001ms !important; animation-iteration-count: 1 !important;
     transition-duration: .001ms !important;
   }
+}
+
+.mc-detect-warn {
+  margin: 0; padding: 7px 11px; font-size: 11.5px; line-height: 1.4;
+  color: var(--critical); background: rgba(208, 59, 59, .10);
+  border-top: 1px solid var(--border-soft);
 }

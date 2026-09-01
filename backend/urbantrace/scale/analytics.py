@@ -63,31 +63,69 @@ def plate_trajectory(plate: str, hours: float = 24.0, limit: int = 500) -> dict:
     """, (keys, _window(hours), limit))
 
     sightings = [r for r in rows if same_vehicle(plate, r["plate"])]
-    legs = _legs_from(sightings)
+    legs, breaks = _legs_from(sightings)
     cameras = {s["camera_id"] for s in sightings}
+
+    # Duration is the time SPENT TRAVELLING, summed over real legs -- not
+    # last_seen minus first_seen, which counts the hours or days a vehicle sat
+    # somewhere unobserved between two unrelated trips.
+    travelling = round(sum(l["travel_minutes"] for l in legs), 2) if legs else None
+    span = (round((sightings[-1]["observed_at"] - sightings[0]["observed_at"])
+                  .total_seconds() / 60.0, 2) if len(sightings) > 1 else None)
+
     return {
         "plate": plate,
         "sightings": sightings,
         "legs": legs,
+        "breaks": breaks,
+        "journeys": len(breaks) + 1 if sightings else 0,
         "cameras": len(cameras),
         "first_seen": sightings[0]["observed_at"] if sightings else None,
         "last_seen": sightings[-1]["observed_at"] if sightings else None,
+        # travelling_minutes is the measurement; observed_span_minutes is the
+        # wall-clock window it happened inside. They differ whenever the vehicle
+        # was out of sight long enough to break the journey.
+        "travelling_minutes": travelling,
+        "observed_span_minutes": span,
         "spellings": sorted({s["plate"] for s in sightings}),
         "window_hours": hours,
     }
 
 
-def _legs_from(sightings: list) -> list:
-    """Measured hop between consecutive sightings at DIFFERENT cameras."""
+def _legs_from(sightings: list) -> tuple[list, list]:
+    """Split a plate's sightings into journeys and measure the legs within them.
+
+    Returns (legs, breaks).
+
+    A gap longer than `max_leg_gap_minutes` is NOT a leg. Two sightings days
+    apart describe two separate trips, not one impossibly slow journey, and
+    treating them as a leg poisons every aggregate that averages travel time or
+    speed. The gap is still reported -- as a `break` -- so the operator can see
+    the vehicle returned rather than having the connection silently dropped.
+    """
     from .registry import REGISTRY
 
-    legs = []
+    legs, breaks = [], []
     prev = None
     for s in sightings:
         if prev is not None and s["camera_id"] != prev["camera_id"]:
-            legs.append(_leg(prev, s, REGISTRY))
+            minutes = (s["observed_at"] - prev["observed_at"]).total_seconds() / 60.0
+            if minutes > SCALE.max_leg_gap_minutes:
+                breaks.append({
+                    "after_camera": prev["camera_id"],
+                    "before_camera": s["camera_id"],
+                    "left_at": prev["observed_at"],
+                    "returned_at": s["observed_at"],
+                    "gap_minutes": round(minutes, 2),
+                    "reason": (f"{minutes / 60.0:.1f} h between {prev['camera_id']} and "
+                               f"{s['camera_id']} exceeds the "
+                               f"{SCALE.max_leg_gap_minutes:.0f} min continuity limit; "
+                               f"treated as a separate journey, not a single leg."),
+                })
+            else:
+                legs.append(_leg(prev, s, REGISTRY))
         prev = s
-    return legs
+    return legs, breaks
 
 
 def _leg(a: dict, b: dict, registry) -> dict:
@@ -200,8 +238,9 @@ def network_summary(hours: float = 1.0) -> dict:
           (select round(avg(confidence)::numeric, 3) from net_sightings
              where observed_at >= %s) as mean_confidence,
           (select round(avg(implied_speed_kmh)::numeric, 1) from net_legs
-             where arrived >= %s and verdict <> 'IMPLAUSIBLE') as mean_speed_kmh
-    """, (since,) * 7)[0]
+             where arrived >= %s and verdict <> 'IMPLAUSIBLE'
+               and travel_minutes <= %s) as mean_speed_kmh
+    """, (since,) * 6 + (since, SCALE.max_leg_gap_minutes))[0]
     row["window_hours"] = hours
     return row
 
@@ -222,13 +261,17 @@ def origin_destination(hours: float = 6.0, min_vehicles: int = 1, limit: int = 2
         from net_legs l
         left join net_cameras a on a.camera_id = l.from_camera
         left join net_cameras b on b.camera_id = l.to_camera
+        -- Exclude impossible legs AND legs longer than the continuity limit.
+        -- The travel_minutes bound also protects rows written before the limit
+        -- existed, so historical data cannot skew the averages.
         where l.arrived >= %s and l.verdict <> 'IMPLAUSIBLE'
+          and l.travel_minutes <= %s
         group by l.from_camera, l.to_camera, a.name, b.name,
                  a.latitude, a.longitude, b.latitude, b.longitude
         having count(*) >= %s
         order by vehicles desc
         limit %s
-    """, (_window(hours), min_vehicles, limit))
+    """, (_window(hours), SCALE.max_leg_gap_minutes, min_vehicles, limit))
 
 
 # ---------------------------------------------------------- congestion
@@ -253,13 +296,14 @@ def refresh_baseline(days: int = 28) -> int:
                 from net_legs
                 where arrived >= %s and verdict <> 'IMPLAUSIBLE'
                   and implied_speed_kmh is not null
+                  and travel_minutes <= %s
                 group by from_camera, to_camera, hour_of_day
                 on conflict (from_camera, to_camera, hour_of_day) do update set
                   samples = excluded.samples,
                   mean_speed_kmh = excluded.mean_speed_kmh,
                   mean_travel_minutes = excluded.mean_travel_minutes,
                   updated_at = now()
-            """, (since,))
+            """, (since, SCALE.max_leg_gap_minutes))
             n = cur.rowcount
         conn.commit()
     return n
@@ -284,6 +328,7 @@ def congestion(hours: float = 1.0, min_samples: int | None = None,
             from net_legs
             where arrived >= %s and verdict <> 'IMPLAUSIBLE'
               and implied_speed_kmh is not null
+              and travel_minutes <= %s
             group by from_camera, to_camera, hour_of_day
         )
         select l.from_camera, l.to_camera,
@@ -312,7 +357,7 @@ def congestion(hours: float = 1.0, min_samples: int | None = None,
           and f.mean_speed_kmh > 0
           and l.speed_now / f.mean_speed_kmh < %s
         order by speed_ratio asc
-    """, (_window(hours), min_samples, speed_ratio))
+    """, (_window(hours), SCALE.max_leg_gap_minutes, min_samples, speed_ratio))
 
 
 def flow_trend(hours: float = 6.0, bucket_minutes: int = 15) -> list:

@@ -160,6 +160,12 @@ class IngestService:
         visits = sorted(first.values(), key=lambda s: s.observed_at)
         out = []
         for a, b in zip(visits, visits[1:]):
+            gap = (b.observed_at - a.observed_at).total_seconds() / 60.0
+            if gap > SCALE.max_leg_gap_minutes:
+                # Not one journey. Writing this as a leg would put an
+                # arbitrarily long travel time into the origin-destination
+                # matrix and the congestion baseline.
+                continue
             out.append(self._leg(a, b))
         return out
 

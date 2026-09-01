@@ -37,8 +37,6 @@ export default function Overview({ onTrack }: { onTrack: (plate: string) => void
               sub={`${summary.observations} observations`} />
         <Tile label="Multi-camera routes" value={summary.multi_camera} accent="var(--s4)"
               sub="reconstructed trajectories" />
-        <Tile label="Mean OCR confidence" value={summary.mean_ocr_conf} decimals={3}
-              sub={`${summary.raw_readings} raw frame reads`} />
         <Tile label="Alerts" value={summary.alerts}
               accent={summary.alerts ? 'var(--critical)' : undefined}
               sub={summary.alerts ? 'watchlist matches' : 'no watchlist hits'} />
