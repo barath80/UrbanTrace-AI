@@ -118,5 +118,52 @@ class ScaleSettings:
 
     site_id: str = field(default_factory=lambda: _s("UT_SITE_ID", "default"))
 
+    # ---- stream capture --------------------------------------------
+    # Longest edge of a frame handed to the detectors. The plate detector runs
+    # at 960, so anything wider than this is decoded, queued and copied for
+    # nothing. 0 disables the downscale.
+    max_frame_width: int = field(default_factory=lambda: _i("UT_MAX_FRAME_WIDTH", 1280))
+    rtsp_transport: str = field(default_factory=lambda: _s("UT_RTSP_TRANSPORT", "tcp"))
+    open_timeout_ms: int = field(default_factory=lambda: _i("UT_OPEN_TIMEOUT_MS", 8000))
+    read_timeout_ms: int = field(default_factory=lambda: _i("UT_READ_TIMEOUT_MS", 8000))
+    reconnect_min_s: float = field(default_factory=lambda: _f("UT_RECONNECT_MIN_S", 1.0))
+    reconnect_max_s: float = field(default_factory=lambda: _f("UT_RECONNECT_MAX_S", 60.0))
+    # Streams being opened at once. Starting 100+ feeds together stalls the
+    # network and the decoder; a small gate staggers the start.
+    max_concurrent_opens: int = field(default_factory=lambda: _i("UT_MAX_OPENS", 6))
+    # Motion gate: an unchanged scene is not worth a detector pass. A frame is
+    # still sent every `idle_keyframe_s`, so a stopped vehicle is not missed.
+    motion_gate: bool = field(default_factory=lambda: _b("UT_MOTION_GATE", True))
+    # Run the detectors once at every batch size before taking traffic, so the
+    # slow first call per input shape is paid at startup, not on live frames.
+    warmup: bool = field(default_factory=lambda: _b("UT_WARMUP", True))
+    motion_pixel_delta: int = field(default_factory=lambda: _i("UT_MOTION_PIXEL_DELTA", 14))
+    motion_min_fraction: float = field(default_factory=lambda: _f("UT_MOTION_MIN_FRACTION", 0.004))
+    idle_keyframe_s: float = field(default_factory=lambda: _f("UT_IDLE_KEYFRAME_S", 2.0))
+    # Files (not live feeds) restart at the end. Meant for bench testing.
+    loop_files: bool = field(default_factory=lambda: _b("UT_LOOP_FILES", False))
+
+    # ---- adaptive load shedding -------------------------------------
+    # The analysis rate per camera moves between these bounds so the pipeline
+    # sheds load smoothly when the GPU saturates instead of dropping frames at
+    # random, and recovers when it frees up.
+    adaptive_fps: bool = field(default_factory=lambda: _b("UT_ADAPTIVE_FPS", True))
+    min_fps_per_camera: float = field(default_factory=lambda: _f("UT_MIN_FPS", 0.5))
+    adapt_interval_s: float = field(default_factory=lambda: _f("UT_ADAPT_INTERVAL_S", 5.0))
+    # Fraction of submitted frames dropped (oldest-first) that triggers a cut.
+    adapt_drop_high: float = field(default_factory=lambda: _f("UT_ADAPT_DROP_HIGH", 0.10))
+    adapt_drop_low: float = field(default_factory=lambda: _f("UT_ADAPT_DROP_LOW", 0.01))
+
+    # ---- cluster membership ----------------------------------------
+    worker_id: str = field(default_factory=lambda: _s("UT_WORKER_ID", ""))
+    worker_heartbeat_s: float = field(default_factory=lambda: _f("UT_WORKER_HEARTBEAT_S", 5.0))
+    # A worker silent for this long is presumed dead and its cameras move.
+    worker_ttl_s: float = field(default_factory=lambda: _f("UT_WORKER_TTL_S", 20.0))
+    # Cameras in one `sector` (else one grid cell of this size) are always
+    # owned by the same worker, so neighbouring cameras share an identity index
+    # and the legs between them can be measured.
+    shard_cell_km: float = field(default_factory=lambda: _f("UT_SHARD_CELL_KM", 3.0))
+    worker_port: int = field(default_factory=lambda: _i("UT_WORKER_PORT", 9100))
+
 
 SCALE = ScaleSettings()

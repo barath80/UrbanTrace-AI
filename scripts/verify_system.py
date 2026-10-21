@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -93,6 +94,14 @@ def main() -> int:
 
     if args.cameras:
         print(f"\n[0] Building {args.cameras} overlapping test clip(s)")
+        # Only remove clips this script generated. Anything else in the folder
+        # is real footage and must never be deleted by a self-test.
+        own = re.compile(r"^(CAMERA_\d+|_source)\.mp4$")
+        foreign = [f.name for f in VIDEO_DIR.glob("*.mp4") if not own.match(f.name)]
+        if foreign:
+            print(f"refusing to overwrite {VIDEO_DIR}: it contains your own videos "
+                  f"({', '.join(foreign)}). Move them out, or run without --cameras.")
+            return 1
         for f in VIDEO_DIR.glob("*.mp4"):
             f.unlink()
         if not build_test_clips(args.cameras):

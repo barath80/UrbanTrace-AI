@@ -33,6 +33,7 @@ pipeline stops rather than fabricating output.
 - [API reference](#api-reference)
 - [Project structure](#project-structure)
 - [Verification](#verification)
+- [Production deployment](#production-deployment-100-live-cameras)
 - [Honest limitations](#honest-limitations)
 - [Security](#security)
 
@@ -903,6 +904,76 @@ python scripts/benchmark_temporal_blur.py       # temporal aggregation benefit
 check, then purges its own test artefacts.
 
 ---
+
+## Production deployment (100+ live cameras)
+
+```
+ browsers ──► nginx (lb) ──► api ×N        stateless, any replica serves any request
+                                │
+                                ▼
+                      PostgreSQL / PostGIS ◄──── worker ×M   ingest, GPU, one per slice of the city
+                                                   │
+                                      RTSP / HTTP / file feeds (100s of cameras)
+```
+
+```bash
+cp .env.example .env                       # set POSTGRES_PASSWORD, UT_API_KEY
+# put detector weights in models/weights/
+docker compose up -d --scale api=2 --scale worker=4
+```
+
+Cameras are data, not code. Add them in the **Fleet** tab (one at a time or from a
+CSV), through `POST /api/network/cameras[/bulk]`, or with
+`python -m urbantrace.scale.worker --import-cameras data/cameras.json`. Each has a
+`source` (an `rtsp://` URL, an HTTP stream, a file, or empty for push-only) and
+real coordinates. Workers re-read the estate every 15 s; no restart is needed.
+
+**How the load is spread**
+
+* Workers heartbeat into `net_workers`. Each computes, from the same list, which
+  cameras it owns, by rendezvous hashing on the camera's sector (else a 3 km grid cell), bounded
+  to 1.25x the average load so clumped cameras still spread evenly. A lost worker's
+  cameras move after a 20 s TTL. Nothing coordinates, so nothing is a single point of failure.
+* Neighbouring cameras land on the same worker so their shared identity index can
+  measure the legs between them. A leg between two cameras on either side of a cell
+  edge is not written to `net_legs`; trajectory queries, which join in SQL, still show it.
+* API replicas are stateless behind nginx; scale them independently with `--scale api=N`.
+  `/api/ready` takes a replica out of rotation when its database is unreachable.
+
+**How the compute is kept low** (`urbantrace/scale/capture.py`, `adaptive.py`)
+
+* Each feed is sampled at `UT_TARGET_FPS` (default 6), not at the camera's 25-30. Only
+  due frames are converted; the rest are `grab()`-ed and discarded.
+* A motion gate skips detector passes on an unchanged scene, with a keyframe every 2 s.
+* Frames are downscaled to 1280 px wide before queueing.
+* All feeds share one detector and one OCR engine, batched across cameras; the plate
+  pass is skipped when no vehicle on that camera is still unread.
+* If the GPU saturates, the analysis rate for every camera falls together (down to
+  `UT_MIN_FPS`) and recovers when load eases, instead of random frames being lost.
+* Point cameras at their low-resolution sub-stream: `grab()` still decodes.
+
+**Operations**
+
+| | |
+|---|---|
+| Worker probes | `:9100/healthz`, `/readyz`, `/metrics` (Prometheus), `/status` |
+| Fleet view | `GET /api/network/fleet`, `/workers`, `/feeds` |
+| Auth | `UT_API_KEY` protects writes; `UT_API_AUTH=all` protects reads too |
+| Database | `DATABASE_URL` for any PostGIS server; Supabase still works |
+| Shutdown | workers flush buffered sightings and deregister on SIGTERM |
+
+Measured on an RTX 5060 Laptop (8 GB), 16 looping 1080p clips through the whole path
+(`python scripts/bench_fleet.py --cameras 16`): **about 50 analysed frames/s**, peak
+VRAM under 1.5 GiB. VRAM is not the limit. Larger batches, a third worker, and smaller
+detector input sizes did not raise it (they measured 33-49 fps), so treat ~50 fps as
+this machine's ceiling: roughly 8 cameras at 6 fps, 25 at 2 fps, or 50 at 1 fps. The
+clips are continuously busy; real feeds have quiet periods the motion gate skips, so
+re-run the benchmark against your own footage before sizing. More cameras than that
+need more workers on more GPUs.
+
+Capacity is set by the GPU, not by the camera count: see
+[backend/urbantrace/scale/README.md](backend/urbantrace/scale/README.md) for measured
+figures. Plan workers from `frames/s per worker` in the Fleet tab, not from a guess.
 
 ## Honest limitations
 

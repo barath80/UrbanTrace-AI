@@ -1,0 +1,10 @@
+.git
+.env
+**/__pycache__
+web/node_modules
+web-dist
+data
+models
+*.ipynb
+.ipynb_checkpoints
+tests

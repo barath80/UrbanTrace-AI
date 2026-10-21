@@ -32,6 +32,7 @@ the two sightings. Sharing a key is a hypothesis, never a conclusion.
 from __future__ import annotations
 
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -217,6 +218,9 @@ class IdentityIndex:
         self._by_key: dict[str, set[str]] = {}     # blocking key -> cluster ids
         self._by_track: dict[tuple, str] = {}      # (camera, track) -> cluster id
         self._seq = 0
+        # Cluster ids are primary keys in a table shared by every worker, so a
+        # bare counter would collide across processes and across restarts.
+        self._nonce = uuid.uuid4().hex[:8]
         self._feasible = feasible
         self.comparisons = 0                       # candidates actually scored
         self.additions = 0
@@ -257,7 +261,7 @@ class IdentityIndex:
 
             if best_id is None:
                 self._seq += 1
-                cid = f"GV_{self._seq:08d}"
+                cid = f"GV_{self._nonce}_{self._seq:06d}"
                 cluster = Cluster(cluster_id=cid, plate=s.plate)
                 self._clusters[cid] = cluster
                 self._absorb(cluster, s)

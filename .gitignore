@@ -25,3 +25,9 @@ data/datasets/**/*.zip
 data/output/accuracy/
 testing_accuracy_executed.ipynb
 .ipynb_checkpoints/
+
+# Generated artefacts: produced by running the pipeline, never committed.
+data/output/
+data/ui_shots/
+*_executed.ipynb
+data/cameras.json

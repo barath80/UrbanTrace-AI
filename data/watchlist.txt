@@ -2,4 +2,3 @@
 # Alerts fire ONLY for plates listed here. Empty file = no watchlist alerts.
 # Example (delete this comment and add real plates):
 # TN09AB1234
-TN01AB1234

@@ -1,0 +1,94 @@
+# UrbanTrace AI production stack.
+#
+#   cp .env.example .env            # set secrets
+#   docker compose up -d --scale api=2 --scale worker=4
+#
+# Scale the API for dashboard load and the workers for camera count / GPU
+# throughput independently; neither needs a restart of the other.
+
+x-app: &app
+  image: urbantrace:latest
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  environment: &appenv
+    DATABASE_URL: postgresql://urbantrace:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/urbantrace
+    UT_DB_SSLMODE: disable
+  volumes:
+    - ./models/weights:/app/models/weights:ro
+    - evidence:/app/data/live_evidence
+  depends_on:
+    db: { condition: service_healthy }
+    init: { condition: service_completed_successfully }
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: urbantrace
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: urbantrace
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U urbantrace -d urbantrace"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot, idempotent: applies both schemas on every deploy.
+  init:
+    image: urbantrace:latest
+    build: .
+    env_file: .env
+    environment: *appenv
+    command: ["python", "-m", "urbantrace.scale.worker", "--init-db"]
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    <<: *app
+    environment:
+      <<: *appenv
+      UT_API_PREWARM: "0"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/api/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    deploy:
+      replicas: 2
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "urbantrace.scale.worker"]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9100/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+    stop_grace_period: 30s          # time to flush buffered sightings
+    deploy:
+      replicas: 2
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  lb:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  evidence:

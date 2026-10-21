@@ -83,7 +83,11 @@ class FrameBus:
         if self.target_fps <= 0:
             return True
         now = now or time.monotonic()
-        period = 1.0 / self.target_fps
+        # 10% tolerance: capture already paces frames at this rate, and the few
+        # milliseconds of decode/resize jitter between its clock and this one
+        # would otherwise reject frames that were on schedule and halve the
+        # effective rate.
+        period = 0.9 / self.target_fps
         with self._lock:
             last = self._last_admit.get(camera_id, 0.0)
             if now - last < period:
@@ -202,6 +206,32 @@ class SharedModels:
         if self._ocr is None:
             self.load()
         return self._ocr
+
+    def warmup(self, max_batch: int, size: tuple[int, int] = (1280, 720)) -> float:
+        """Run both detectors once at every batch size 1..max_batch.
+
+        The first call at each new input shape is slow (measured 4-100 s on an
+        RTX 5060 while kernels are selected and compiled), and batches vary in
+        size with load. Without this a freshly started worker analyses nothing
+        for minutes while every frame it is offered is dropped. Doing it before
+        the workers start moves that cost into startup, where it is expected.
+        Returns the seconds spent.
+        """
+        self.load()
+        dev = self._device()
+        quant = 16 if dev != "cpu" else None
+        blank = np.zeros((size[1], size[0], 3), np.uint8)
+        t0 = time.perf_counter()
+        for n in range(1, max(1, max_batch) + 1):
+            frames = [blank] * n
+            with self._veh_lock:
+                self._vehicle.predict(frames, conf=SCALE.vehicle_conf, imgsz=SCALE.vehicle_imgsz,
+                                      classes=list(VEHICLE_CLASSES), device=dev,
+                                      quantize=quant, verbose=False)
+            with self._plate_lock:
+                self._plate.predict(frames, conf=SCALE.plate_conf, imgsz=SCALE.plate_imgsz,
+                                    device=dev, quantize=quant, verbose=False)
+        return time.perf_counter() - t0
 
     def detect_batch(self, frames: list, need_plates: list | None = None) -> tuple[list, list]:
         """Run both detectors over a batch. Returns (vehicle_dets, plate_boxes).
@@ -332,6 +362,9 @@ class InferencePool:
         if self._threads:
             return
         self.models.load()
+        if SCALE.warmup and hasattr(self.models, "warmup"):
+            logger.info("detector warm-up done in %.1fs",
+                        self.models.warmup(SCALE.batch_size))
         self._stop.clear()
         self.started_at = time.time()
         n = workers or SCALE.inference_workers

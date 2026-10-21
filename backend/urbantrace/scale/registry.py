@@ -157,6 +157,21 @@ class CameraRegistry:
             n += 1
         return n
 
+    def replace(self, entries: Iterable[dict]) -> int:
+        """Swap in a new camera set without ever exposing an empty registry.
+
+        `clear()` then `load()` leaves a window in which every sighting looks
+        like it came from an unknown camera. This builds the new state aside and
+        swaps it in one step, so a live process can refresh its estate safely.
+        """
+        fresh = CameraRegistry(self._grid.cell_km)
+        n = fresh.load(entries)
+        fresh.build_graph()
+        self._nodes, self._grid = fresh._nodes, fresh._grid
+        self._edges, self._neighbours = fresh._edges, fresh._neighbours
+        self._graph_built = True
+        return n
+
     def load_file(self, path: str | Path) -> int:
         p = Path(path)
         raw = json.loads(p.read_text(encoding="utf-8"))

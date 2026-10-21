@@ -4,11 +4,10 @@ The network is NOT fixed at three cameras. It is built at run time from
 whatever videos are present in `data/videos/`, one camera per video, in any
 number.
 
-Location mapping, in priority order:
-  1. `data/cameras.json`  - your explicit mapping (video file -> place, lat/lon)
-  2. `DEFAULT_LOCATIONS`  - a Chennai-corridor fallback pool, used in order for
-                            any video without an entry, so the system works
-                            out of the box and can be corrected later.
+Locations come only from `data/cameras.json` (video file -> place, lat/lon).
+A video with no entry there is skipped with a warning: a camera placed at an
+invented coordinate would put its vehicles on the wrong road in every journey,
+speed and congestion figure derived from it.
 
 Road links between cameras are derived from the coordinates: cameras are
 ordered along the corridor and consecutive pairs get an edge, plus skip-edges
@@ -17,35 +16,20 @@ so a vehicle missed by an intermediate camera still forms a valid transition.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 ROOT = Path(__file__).resolve().parents[3]
 VIDEO_DIR = ROOT / "data" / "videos"
 CONFIG_FILE = ROOT / "data" / "cameras.json"
 
 VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".mpg", ".mpeg")
-
-# Fallback locations along the real Chennai western corridor, used in order for
-# any video that has no explicit entry in cameras.json. Edit cameras.json to
-# map your footage to its true locations.
-DEFAULT_LOCATIONS = [
-    ("Koyambedu Junction",   "100 Feet Road / Jawaharlal Nehru Salai", 13.0694, 80.1948, "WEST"),
-    ("Ambattur Estate",      "Chennai-Tiruvallur High Road",           13.1143, 80.1548, "WEST"),
-    ("Avadi Checkpost",      "Chennai-Tiruvallur High Road",           13.1147, 80.1098, "WEST"),
-    ("Thiruninravur",        "Chennai-Tiruvallur High Road",           13.1180, 80.0300, "WEST"),
-    ("Tiruvallur Bypass",    "NH-716 Tiruvallur Bypass",               13.1430, 79.9080, "WEST"),
-    ("Poonamallee Bypass",   "NH-48 Poonamallee Bypass",               13.0480, 80.0950, "WEST"),
-    ("Porur Junction",       "Mount-Poonamallee Road",                 13.0358, 80.1565, "WEST"),
-    ("Guindy Junction",      "Anna Salai / GST Road",                  13.0067, 80.2206, "SOUTH"),
-    ("Tambaram",             "GST Road (NH-45)",                       12.9249, 80.1000, "SOUTH"),
-    ("Chengalpattu",         "GST Road (NH-45)",                       12.6819, 79.9760, "SOUTH"),
-    ("Sriperumbudur",        "NH-48 Chennai-Bengaluru Highway",        12.9675, 79.9430, "WEST"),
-    ("Kanchipuram",          "NH-48 / Chennai-Bengaluru Highway",      12.8342, 79.7036, "WEST"),
-]
 
 # Road distance is ~1.25x great-circle for an urban corridor.
 ROAD_FACTOR = 1.25
@@ -165,16 +149,15 @@ def load_network(video_dir: Path | None = None,
     for i, vid in enumerate(videos):
         entry = cfg.get(vid.name) or cfg.get(f"CAM_{i+1:02d}") or {}
         cam_id = entry.get("camera_id") or f"CAM_{i+1:02d}"
-        if entry:
-            name = entry.get("name", f"Camera {i+1}")
-            road = entry.get("road", "")
-            lat = float(entry["latitude"]); lon = float(entry["longitude"])
-            direction = entry.get("direction", "UNKNOWN")
-            src = "config"
-        else:
-            d = DEFAULT_LOCATIONS[i % len(DEFAULT_LOCATIONS)]
-            name, road, lat, lon, direction = d
-            src = "default"
+        if "latitude" not in entry or "longitude" not in entry:
+            logger.warning("%s has no latitude/longitude in %s; camera skipped",
+                           vid.name, CONFIG_FILE.name)
+            continue
+        name = entry.get("name", f"Camera {i+1}")
+        road = entry.get("road", "")
+        lat = float(entry["latitude"]); lon = float(entry["longitude"])
+        direction = entry.get("direction", "UNKNOWN")
+        src = "config"
 
         cl = entry.get("count_line")
         CAMERAS[cam_id] = Camera(
@@ -300,8 +283,8 @@ def write_config_template(path: Path | None = None) -> Path:
     path = Path(path) if path else CONFIG_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "_comment": ("Map each video to its real location. Delete entries to fall "
-                     "back to DEFAULT_LOCATIONS. start_time is the configured "
+        "_comment": ("Map each video to its real location. Delete entries to "
+                     "skip the camera. start_time is the configured "
                      "wall-clock capture start; leave blank to auto-stagger. "
                      "count_line is [x1,y1,x2,y2] in 0..1 frame coords; set it "
                      "to count vehicles that CROSS the line rather than "

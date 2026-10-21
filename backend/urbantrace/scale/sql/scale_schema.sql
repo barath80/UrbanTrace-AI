@@ -204,3 +204,33 @@ create table if not exists net_flow_baseline (
     updated_at    timestamptz not null default now(),
     primary key (from_camera, to_camera, hour_of_day)
 );
+
+-- ------------------------------------------------------------ cluster
+-- Ingest workers heartbeat here. A worker whose heartbeat is older than the
+-- TTL is treated as gone and its cameras are taken over by the others.
+create table if not exists net_workers (
+    worker_id    text primary key,
+    host         text,
+    started_at   timestamptz not null default now(),
+    heartbeat_at timestamptz not null default now(),
+    stats        jsonb not null default '{}'::jsonb
+);
+create index if not exists idx_net_workers_beat on net_workers (heartbeat_at desc);
+
+-- Latest state of every feed, written by the worker that owns it.
+create table if not exists net_camera_health (
+    camera_id          text primary key,
+    worker_id          text,
+    state              text not null,
+    source_fps         double precision,
+    resolution         text,
+    frames_read        bigint not null default 0,
+    frames_submitted   bigint not null default 0,
+    frames_skipped_static bigint not null default 0,
+    reconnects         int not null default 0,
+    last_frame_at      timestamptz,
+    last_error         text,
+    updated_at         timestamptz not null default now()
+);
+create index if not exists idx_net_health_state on net_camera_health (state);
+create index if not exists idx_net_health_worker on net_camera_health (worker_id);

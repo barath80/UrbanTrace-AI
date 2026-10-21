@@ -71,6 +71,9 @@ class IngestService:
         self._legs: dict = {}             # cluster_id -> legs
         self._maintenance: threading.Thread | None = None
         self._stop = threading.Event()
+        # When set (by a worker), the cameras this process owns. None means the
+        # static hash shard applies.
+        self.assigned: set | None = None
         self.started_at: float | None = None
         self.sightings_seen = 0
         self.rejected_other_shard = 0
@@ -81,7 +84,8 @@ class IngestService:
         self.registry.build_graph()
         self.sink.start()
         self.pool.start(workers=workers)
-        self.alerts.watchlist.load(force=True)
+        if self.sink.enabled:
+            self.alerts.watchlist.load(force=True)
         self._stop.clear()
         self._maintenance = threading.Thread(target=self._maintain, name="scale-maint",
                                              daemon=True)
@@ -102,6 +106,8 @@ class IngestService:
     # ---------------------------------------------------------- ingest
 
     def owns(self, camera_id: str) -> bool:
+        if self.assigned is not None:
+            return camera_id in self.assigned
         return shard_of(camera_id, self.shards) == self.shard_index
 
     def submit_frame(self, camera_id: str, frame, captured_at: datetime | None = None,
@@ -209,6 +215,8 @@ class IngestService:
         while not self._stop.wait(SCALE.sink_flush_seconds):
             try:
                 self.flush()
+                if self.sink.enabled:
+                    self.alerts.watchlist.load()      # self-throttled to its own interval
             except Exception:
                 logger.exception("maintenance flush failed")
 
@@ -218,6 +226,8 @@ class IngestService:
             self._dirty.clear()
             legs = {c: self._legs.get(c, []) for c in dirty}
 
+        if not self.sink.enabled:
+            return {"vehicles_saved": 0, "alerts_written": 0, "sightings_written": 0}
         saved = 0
         if dirty:
             clusters = [c for c in (self.identity.get(cid) for cid in dirty) if c]
@@ -271,10 +281,7 @@ def load_cameras_from_db(registry: CameraRegistry | None = None) -> int:
     rows = repo._fetch("""select camera_id, name, road, sector, latitude, longitude,
                                  direction, source, enabled
                           from net_cameras order by camera_id""")
-    reg.clear()
-    n = reg.load(rows)
-    reg.build_graph()
-    return n
+    return reg.replace(rows)
 
 
 def save_cameras_to_db(registry: CameraRegistry | None = None) -> int:

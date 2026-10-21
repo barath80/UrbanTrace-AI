@@ -21,6 +21,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -39,37 +40,45 @@ from ..vision.aggregate import Reading, aggregate
 from ..vision.detectors import PlateDetector, VehicleTracker, bind_plates_to_tracks
 from ..vision.ocr_engine import get_ocr
 from ..vision.preprocess import crop_with_margin
+from .live_run import LiveRunWriter
 
 logger = logging.getLogger("urbantrace.multicam")
 
 ROOT = Path(__file__).resolve().parents[3]
 
-CAMERA_CONFIGS = [
-    {
-        "camera_id": "CAM_001",
-        "name": "Camera 1 - Koyambedu Junction",
-        "road": "100 Feet Road / Jawaharlal Nehru Salai",
-        "latitude": 13.0694,
-        "longitude": 80.1948,
-        "default_video": "camera1.mp4",
-    },
-    {
-        "camera_id": "CAM_002",
-        "name": "Camera 2 - Ambattur Estate",
-        "road": "Chennai-Tiruvallur High Road",
-        "latitude": 13.1143,
-        "longitude": 80.1548,
-        "default_video": "camera2.mp4",
-    },
-    {
-        "camera_id": "CAM_003",
-        "name": "Camera 3 - Avadi Checkpost",
-        "road": "Chennai-Tiruvallur High Road",
-        "latitude": 13.1147,
-        "longitude": 80.1098,
-        "default_video": "camera3.mp4",
-    },
-]
+def _load_slot_configs() -> list[dict]:
+    """Monitor slots, one per camera in the camera file.
+
+    Read from UT_CAMERAS_FILE, else data/cameras.json. Nothing is invented:
+    a camera needs an id and real coordinates to get a slot, and with no file
+    the monitor simply has no cameras until one is added.
+    """
+    path = Path(os.environ.get("UT_CAMERAS_FILE") or ROOT / "data" / "cameras.json")
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.error("camera file %s unreadable: %s", path, e)
+        return []
+    entries = raw.get("cameras", raw) if isinstance(raw, dict) else raw
+    out = []
+    for e in entries or []:
+        try:
+            out.append({
+                "camera_id": str(e["camera_id"]),
+                "name": str(e.get("name") or e["camera_id"]),
+                "road": str(e.get("road") or ""),
+                "latitude": float(e["latitude"]),
+                "longitude": float(e["longitude"]),
+                "default_video": str(e.get("video_file") or ""),
+            })
+        except (KeyError, TypeError, ValueError):
+            logger.warning("skipping camera entry without id/coordinates: %r", e)
+    return out
+
+
+CAMERA_CONFIGS = _load_slot_configs()
 
 # A plate is only published once the temporal vote has enough independent
 # frames behind it AND clears this confidence floor. Publishing the first
@@ -185,6 +194,7 @@ class CameraSlot:
         # response to a busy slot is to drop.
         self._processing = threading.Lock()
         self.detections_skipped = 0     # frames shown without fresh detection
+        self.detections_run = 0         # frames the detector actually ran on
         self.detect_failures = 0        # detection exceptions, reported in status
         self.last_detect_error: str | None = None
         # Latched by stop_stream(); until it clears, inbound phone frames are
@@ -362,6 +372,7 @@ class CameraSlot:
             self._ensure_models()
             if self._tracker and self._plates:
                 try:
+                    self.detections_run += 1
                     tracks = self._tracker.update(frame_bgr)
                     plates = self._plates.detect(frame_bgr)
                     pairs = bind_plates_to_tracks(plates, tracks)
@@ -500,11 +511,19 @@ class CameraSlot:
             self.error_message = reason
             self.fps = 0.0
 
+    def _begin_session(self) -> None:
+        """A feed is starting, so the live session is now worth recording."""
+        try:
+            LIVE_RUN.start()
+        except Exception as e:              # noqa: BLE001 - recording is optional
+            logger.warning("live run writer failed to start: %s", e)
+
     def start_url_stream(self, url: str, video_name: str = ""):
         """Start background worker to ingest from network stream URL with continuous auto-loop."""
         self.stop_stream()
         self.stopped_by_user = False
         self._stop_event.clear()
+        self._begin_session()
         self.source_type = "network_url"
         self.source_label = url
         self.video_name = video_name or "Network Stream"
@@ -521,6 +540,7 @@ class CameraSlot:
         self.stop_stream()
         self.stopped_by_user = False
         self._stop_event.clear()
+        self._begin_session()
         self.source_type = "local_file"
         self.source_label = file_path.name
         self.video_name = file_path.name
@@ -660,6 +680,10 @@ class CameraSlot:
             "recent_plates": list(self.recent_plates)[:5],
             "active_plate_boxes": len(self.active_plates),
             "detections_skipped": self.detections_skipped,
+            "detections_run": self.detections_run,
+            "detect_every": self.detect_every,
+            "seconds_since_frame": (round(time.time() - self.last_received_at, 1)
+                                    if self.last_received_at > 0 else None),
             "detect_failures": self.detect_failures,
             "last_detect_error": self.last_detect_error,
         }
@@ -702,6 +726,11 @@ class CentralRegistry:
             self._sightings = [s for s in self._sightings
                                if (s["camera_id"], s["track_id"]) != key]
             self._sightings.append(sighting)
+        # Also persist it, so the GIS map, Vehicle Tracking, Analytics and
+        # Observations tabs show this session instead of the last batch run.
+        # Queued and written by a background thread; a database problem can
+        # never slow down or stop a camera.
+        LIVE_RUN.record(sighting)
 
     @staticmethod
     def _haversine_km(a_lat, a_lon, b_lat, b_lon) -> float:
@@ -834,9 +863,15 @@ class CentralRegistry:
 
 REGISTRY = CentralRegistry()
 
+# Mirrors the live session into a database run so the GIS map, Vehicle Tracking,
+# Analytics and Observations tabs show what the cameras are seeing now rather
+# than the newest batch run. Writes happen on its own thread and can fail
+# without affecting any feed.
+LIVE_RUN = LiveRunWriter(journeys_fn=REGISTRY.journeys)
+
 
 class MultiCamManager:
-    """Central manager for the 3 camera feeds."""
+    """Central manager for the monitor slots (one per configured camera)."""
 
     def __init__(self):
         self.slots: Dict[str, CameraSlot] = {}
@@ -851,6 +886,8 @@ class MultiCamManager:
             )
             REGISTRY.register_camera(cfg["camera_id"], cfg["latitude"],
                                      cfg["longitude"], cfg["name"])
+            LIVE_RUN.register_camera(cfg["camera_id"], cfg["name"], cfg["road"],
+                                     cfg["latitude"], cfg["longitude"])
 
     def get_slot(self, camera_id: str) -> Optional[CameraSlot]:
         return self.slots.get(camera_id)
@@ -859,6 +896,7 @@ class MultiCamManager:
         return [self.slots[cfg["camera_id"]].get_status() for cfg in CAMERA_CONFIGS]
 
     def stop_all(self):
+        LIVE_RUN.stop()
         for slot in self.slots.values():
             slot.stop_stream()
 
@@ -895,6 +933,7 @@ async def ws_camera_ingest(websocket: WebSocket, camera_id: str):
     slot.source_type = "phone_web"
     slot.source_label = "Android Phone (Web Streamer)"
     slot.status = "playing"
+    slot._begin_session()
     slot.error_message = None
     logger.info(f"Phone connected to {camera_id} via WebSocket")
 
@@ -1061,6 +1100,7 @@ def get_multi_camera_status():
         "cameras": cams,
         "detections": MULTICAM.get_all_detections(),
         "network": REGISTRY.summary(),
+        "live_run": LIVE_RUN.status.to_dict(),
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "all_connected": all(c["status"] == "playing" for c in cams),
     }
@@ -1128,7 +1168,7 @@ def connect_local_stream(camera_id: str, video_file: str = ""):
 
     file_name = video_file or slot.default_video
     video_path = ROOT / "data" / "videos" / file_name
-    if not video_path.exists():
+    if not file_name or not video_path.exists():
         # Fall back to a DIFFERENT clip per camera rather than handing every
         # slot the same file, which made three feeds look identical and made
         # cross-camera matching meaningless.
@@ -1154,7 +1194,7 @@ def stop_camera_stream(camera_id: str):
 
 @router.post("/api/multi-camera/stop-all")
 def stop_all_camera_streams():
-    """Stop all 3 camera streams at once."""
+    """Stop every camera stream at once."""
     MULTICAM.stop_all()
     return {"status": "all_stopped", "cameras": MULTICAM.get_all_status()}
 

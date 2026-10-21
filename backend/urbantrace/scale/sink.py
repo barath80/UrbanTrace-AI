@@ -135,7 +135,7 @@ class SightingSink:
 
     def _write(self, pending: list) -> int:
         from psycopg2.extras import execute_values
-        from ..db.client import connect
+        from ..db.client import pooled
 
         rows = []
         days: set[date] = set()
@@ -153,20 +153,20 @@ class SightingSink:
             ))
 
         cols = ", ".join(SIGHTING_COLUMNS)
-        with connect() as conn:
+        with pooled() as conn:
             with conn.cursor() as cur:
                 # Make sure a bounded daily partition exists before writing, so
                 # rows land in a droppable partition rather than piling into
                 # the catch-all default.
-                for d in sorted(days):
-                    if d not in self._partitions:
-                        cur.execute("select ensure_sighting_partition(%s)", (d,))
-                        self._partitions.add(d)
+                new_days = [d for d in sorted(days) if d not in self._partitions]
+                for d in new_days:
+                    cur.execute("select ensure_sighting_partition(%s)", (d,))
                 execute_values(
                     cur,
                     f"insert into net_sightings ({cols}) values %s",
                     rows, page_size=max(50, self.batch_size))
-            conn.commit()
+        # Cached only after the commit, so a rolled-back partition is retried.
+        self._partitions.update(new_days)
         return len(rows)
 
     # ---------------------------------------------------------- status
@@ -209,7 +209,7 @@ class VehicleUpsert:
         import json
 
         from psycopg2.extras import execute_values
-        from ..db.client import connect
+        from ..db.client import pooled
 
         rows = []
         for c in clusters:
@@ -231,7 +231,7 @@ class VehicleUpsert:
                 ))
 
         try:
-            with connect() as conn:
+            with pooled() as conn:
                 with conn.cursor() as cur:
                     execute_values(cur, """
                         insert into net_vehicles
@@ -269,7 +269,6 @@ class VehicleUpsert:
                               reason = excluded.reason
                         """, leg_rows)
                         self.legs_written += len(leg_rows)
-                conn.commit()
         except Exception as e:
             self.failures += 1
             self.last_error = f"{type(e).__name__}: {e}"

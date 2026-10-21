@@ -17,10 +17,26 @@ export class ApiError extends Error {
   }
 }
 
+const KEY_STORE = 'ut_api_key'
+
+export function getApiKey(): string {
+  try { return localStorage.getItem(KEY_STORE) ?? '' } catch { return '' }
+}
+
+export function setApiKey(key: string): void {
+  try {
+    if (key) localStorage.setItem(KEY_STORE, key)
+    else localStorage.removeItem(KEY_STORE)
+  } catch { /* storage unavailable: the key lasts only until reload */ }
+}
+
 export async function api<T = unknown>(
   path: string, init?: RequestInit & { signal?: AbortSignal },
 ): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init)
+  const key = getApiKey()
+  const headers = new Headers(init?.headers)
+  if (key) headers.set('X-API-Key', key)
+  const res = await fetch(`${BASE}${path}`, { ...init, headers })
   if (!res.ok) {
     let detail = res.statusText
     try {
@@ -255,6 +271,13 @@ export interface MultiCamSlot {
   /** Detection exceptions since the feed started; > 0 means readings are being lost. */
   detect_failures?: number
   last_detect_error?: string | null
+  /** Frames shown with the previous boxes because the GPU was still busy. */
+  detections_skipped?: number
+  /** Frames the detector actually ran on. */
+  detections_run?: number
+  detect_every?: number
+  /** Age of the most recent frame, or null if none has arrived. */
+  seconds_since_frame?: number | null
 }
 
 export interface MultiCamDetection {
@@ -578,3 +601,78 @@ export const addNetWatchlist = (plate: string, reason = '') =>
 export const getNetWatchlist = () =>
   api<{ plate: string; reason: string; severity: string; active: boolean }[]>('/network/watchlist')
 export const getNetStatus = () => api<Record<string, unknown>>('/network/status')
+
+/* ------------------------------------------------------------- fleet */
+
+export interface NetCameraInput {
+  camera_id: string
+  name: string
+  latitude: number
+  longitude: number
+  road?: string
+  sector?: string
+  direction?: string
+  source?: string
+  enabled?: boolean
+}
+
+export interface NetWorker {
+  worker_id: string
+  host: string | null
+  started_at: string
+  heartbeat_at: string
+  age_s: number | null
+  alive: boolean
+  stats: {
+    cameras_owned?: number
+    throughput_fps?: number
+    rate?: { current_fps: number; target_fps: number; cuts: number }
+    capture?: { feeds: number; by_state: Record<string, number> }
+  }
+}
+
+export interface NetFeed {
+  camera_id: string
+  name: string
+  sector: string | null
+  enabled: boolean
+  source: string | null
+  worker_id: string | null
+  /** live | connecting | reconnecting | stopped | unmonitored | disabled | push-only */
+  state: string
+  source_fps: number | null
+  resolution: string | null
+  frames_read: number | null
+  frames_submitted: number | null
+  frames_skipped_static: number | null
+  reconnects: number | null
+  last_frame_at: string | null
+  last_error: string | null
+}
+
+export interface NetFleet {
+  workers_alive: number
+  workers: number
+  cameras: number
+  feeds_by_state: Record<string, number>
+}
+
+export const getFleet = () => api<NetFleet>('/network/fleet')
+export const getWorkers = () => api<NetWorker[]>('/network/workers')
+export const getFeeds = () => api<NetFeed[]>('/network/feeds')
+export const saveNetCamera = (c: NetCameraInput) =>
+  api('/network/cameras', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(c),
+  })
+export const saveNetCamerasBulk = (cs: NetCameraInput[]) =>
+  api<{ saved: number }>('/network/cameras/bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cs),
+  })
+export const deleteNetCamera = (id: string) =>
+  api(`/network/cameras/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export const setNetCameraEnabled = (id: string, enabled: boolean) =>
+  api(`/network/cameras/${encodeURIComponent(id)}/enabled?enabled=${enabled}`, { method: 'PATCH' })

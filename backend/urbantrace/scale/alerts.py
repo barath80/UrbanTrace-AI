@@ -62,8 +62,12 @@ class Watchlist:
         return self.entries
 
     def match(self, plate: str) -> dict | None:
-        """Watchlist entry for a plate, tolerant of OCR confusion."""
-        self.load()
+        """Watchlist entry for a plate, tolerant of OCR confusion.
+
+        Never touches the database: this runs on the inference threads, and a
+        slow or unreachable database must not stall them. The list is refreshed
+        by `IngestService._maintain` (and by the worker's housekeeping).
+        """
         with self._lock:
             return self._by_canonical.get(canonical_key(plate))
 

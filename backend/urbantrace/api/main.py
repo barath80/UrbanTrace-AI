@@ -10,9 +10,12 @@ so rather than inventing content.
 """
 from __future__ import annotations
 
+import hmac
+import os
+import re
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +35,7 @@ from ..routing import describe as routing_describe, road_route
 from ..trajectory.paths import build_vehicle_paths
 
 ROOT = Path(__file__).resolve().parents[3]
+_SAFE_ID = re.compile(r"[A-Za-z0-9_.\-]{1,64}")    # camera ids that may name a file
 FRONTEND = ROOT / "frontend"        # legacy vanilla-JS dashboard
 WEB_DIST = ROOT / "web-dist"        # built React app (npm run build in web/)
 OUTPUT = ROOT / "data" / "output"
@@ -40,8 +44,34 @@ EVIDENCE = ROOT / "data" / "evidence"
 app = FastAPI(title="UrbanTrace AI",
               description="City-wide multi-camera ANPR, trajectory and traffic intelligence",
               version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"])
+# The dashboard is served from this same origin, so cross-origin access is off
+# unless UT_CORS_ORIGINS lists origins (comma separated) that may call the API.
+_origins = [o.strip() for o in os.environ.get("UT_CORS_ORIGINS", "").split(",") if o.strip()]
+if _origins:
+    app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_methods=["*"],
+                       allow_headers=["*"])
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """Optional API-key gate.
+
+    With UT_API_KEY unset the API is open (development). With it set, writes
+    need the key; UT_API_AUTH=all extends that to every /api read except health
+    probes. The key is sent as `X-API-Key`, `Authorization: Bearer`, or the
+    `api_key` query parameter (for <img>/EventSource, which cannot set headers).
+    """
+    key = os.environ.get("UT_API_KEY")
+    path = request.url.path
+    if key and path.startswith("/api/") and path not in ("/api/health", "/api/ready"):
+        protect_reads = os.environ.get("UT_API_AUTH", "writes").lower() == "all"
+        if request.method not in ("GET", "HEAD", "OPTIONS") or protect_reads:
+            supplied = (request.headers.get("x-api-key")
+                        or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+                        or request.query_params.get("api_key", ""))
+            if not hmac.compare_digest(supplied.encode(), key.encode()):
+                return JSONResponse({"detail": "Missing or invalid API key."}, status_code=401)
+    return await call_next(request)
 app.include_router(multicam_router)
 app.include_router(network_router)
 
@@ -51,21 +81,26 @@ def startup_event():
     import threading
     from ..ingest.multicam import MULTICAM
     def _load_network():
-        # The city registry is read from the database once at boot so spatial
-        # lookups and graph edges are ready before the first sighting arrives.
-        try:
-            from ..scale.service import load_cameras_from_db
-            n = load_cameras_from_db()
-            print(f"[api] camera network loaded: {n} camera(s)")
-        except Exception as e:
-            print(f"[api] camera network not loaded: {type(e).__name__}: {e}")
+        # The registry backs spatial lookups. It is re-read on a timer so
+        # cameras added through any API replica show up in all of them.
+        import time as _t
+        from ..scale.service import load_cameras_from_db
+        while True:
+            try:
+                load_cameras_from_db()
+            except Exception as e:
+                print(f"[api] camera network not loaded: {type(e).__name__}: {e}")
+            _t.sleep(30)
 
     threading.Thread(target=_load_network, daemon=True).start()
 
-    def _prewarm():
-        for slot in MULTICAM.slots.values():
-            slot._ensure_models()
-    threading.Thread(target=_prewarm, daemon=True).start()
+    # Loading detector weights in every API replica is wasted memory in a
+    # deployment where ingest runs in workers; opt in for the single-box setup.
+    if os.environ.get("UT_API_PREWARM") == "1":
+        def _prewarm():
+            for slot in MULTICAM.slots.values():
+                slot._ensure_models()
+        threading.Thread(target=_prewarm, daemon=True).start()
 
 
 def _run(run_id: str | None) -> str:
@@ -89,6 +124,16 @@ def health():
     except Exception:
         out["latest_run"] = None
     return out
+
+
+@app.get("/api/ready")
+def ready():
+    """Readiness for a load balancer: serve traffic only with a live database."""
+    try:
+        ping()
+    except Exception as e:
+        raise HTTPException(503, f"database unavailable: {type(e).__name__}")
+    return {"ready": True}
 
 
 @app.get("/api/runs")
@@ -439,6 +484,8 @@ def video(camera_id: str):
     OpenCV writes mp4v, which browsers refuse to decode. We re-encode once with
     the bundled ffmpeg and cache the result beside the original.
     """
+    if not _SAFE_ID.fullmatch(camera_id):
+        raise HTTPException(400, "Invalid camera id.")
     h264 = OUTPUT / f"{camera_id}_annotated_h264.mp4"
     if h264.exists():
         return FileResponse(h264, media_type="video/mp4")

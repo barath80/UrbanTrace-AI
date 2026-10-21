@@ -4,7 +4,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { getHealth, getSummary, type Health } from './api'
 import Alerts from './views/Alerts'
 import Analytics from './views/Analytics'
+import CameraHealth from './views/CameraHealth'
 import Cameras from './views/Cameras'
+import Fleet from './views/Fleet'
 import CityNetwork from './views/CityNetwork'
 import CityTrack from './views/CityTrack'
 import GisMap from './views/GisMap'
@@ -24,6 +26,8 @@ type ViewId =
   | 'track'
   | 'analytics'
   | 'cameras'
+  | 'health'
+  | 'fleet'
   | 'alerts'
   | 'data'
 
@@ -37,6 +41,8 @@ const TABS: { id: ViewId; label: string; short: string }[] = [
   { id: 'track', label: 'Vehicle Tracking', short: 'Track' },
   { id: 'analytics', label: 'Traffic Analytics', short: 'Stats' },
   { id: 'cameras', label: 'Cameras & Video', short: 'Cams' },
+  { id: 'health', label: 'Feed Health', short: 'Health' },
+  { id: 'fleet', label: 'Fleet', short: 'Fleet' },
   { id: 'alerts', label: 'Alerts', short: 'Alerts' },
   { id: 'data', label: 'Observations', short: 'Data' },
 ]
@@ -136,6 +142,8 @@ export default function App() {
             {view === 'track' && <TrackVehicle initialPlate={plate} />}
             {view === 'analytics' && <Analytics />}
             {view === 'cameras' && <Cameras />}
+            {view === 'health' && <CameraHealth />}
+            {view === 'fleet' && <Fleet />}
             {view === 'alerts' && <Alerts onTrack={track} />}
             {view === 'data' && <Observations onTrack={track} />}
           </motion.div>

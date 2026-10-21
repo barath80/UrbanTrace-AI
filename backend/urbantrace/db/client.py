@@ -32,8 +32,29 @@ def _load_env() -> dict:
                 continue
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip().strip('"').strip("'")
-    env.update({k: v for k, v in os.environ.items() if k.startswith("SUPABASE_")})
+    env.update({k: v for k, v in os.environ.items()
+                if k.startswith(("SUPABASE_", "DATABASE_URL", "UT_DB_"))})
     return env
+
+
+def database_url() -> str | None:
+    """A plain Postgres URL, for any self-hosted or managed PostGIS server.
+
+    When DATABASE_URL is set it wins over the Supabase settings, so the same
+    code runs against the compose-managed PostGIS container in production and
+    Supabase in development.
+    """
+    return _load_env().get("DATABASE_URL") or None
+
+
+def _dsn_candidates() -> list[tuple[str, str]]:
+    """(dsn, sslmode) pairs to try, most preferred first."""
+    url = database_url()
+    if url:
+        return [(url, _load_env().get("UT_DB_SSLMODE", "prefer"))]
+    cfg = get_config()
+    order = [cfg.dsn()] + [d for d in (cfg.pooler_dsn, cfg.direct_dsn) if d != cfg.dsn()]
+    return [(d, "require") for d in order]
 
 
 @dataclass(frozen=True)
@@ -84,19 +105,17 @@ def get_config() -> DbConfig:
 
 
 def connect(timeout: int = 20):
-    """Open a psycopg2 connection, falling back pooler <-> direct."""
+    """Open a psycopg2 connection to the configured database."""
     import psycopg2
-    cfg = get_config()
-    order = [cfg.dsn()] + [d for d in (cfg.pooler_dsn, cfg.direct_dsn) if d != cfg.dsn()]
     last = None
-    for dsn in order:
+    for dsn, sslmode in _dsn_candidates():
         try:
-            return psycopg2.connect(dsn, connect_timeout=timeout, sslmode="require")
+            return psycopg2.connect(dsn, connect_timeout=timeout, sslmode=sslmode)
         except Exception as e:  # try the next transport
             last = e
     raise ConnectionError(
-        f"Could not reach Supabase. Last error: {type(last).__name__}: {last}\n"
-        "If this is an IPv6 error, the direct host is IPv6-only - use the pooler."
+        f"Could not reach the database. Last error: {type(last).__name__}: {last}\n"
+        "On Supabase, an IPv6 error means the direct host is IPv6-only - use the pooler."
     ) from last
 
 
@@ -108,7 +127,14 @@ def connect(timeout: int = 20):
 
 _POOL = None
 _POOL_LOCK = threading.Lock()
-POOL_MIN, POOL_MAX = 1, 8
+POOL_MIN = 1
+POOL_MAX = int(os.environ.get("UT_DB_POOL_MAX", "8"))
+# psycopg2's pool RAISES when it is empty instead of waiting. FastAPI runs sync
+# handlers on a 40-thread pool, so a burst larger than POOL_MAX turned into 500s
+# (measured: 30 concurrent dashboard requests against 8 connections). The
+# semaphore makes the extra callers queue for a connection instead.
+POOL_WAIT_S = float(os.environ.get("UT_DB_POOL_WAIT_S", "30"))
+_SLOTS = threading.BoundedSemaphore(POOL_MAX)
 
 
 def _pool():
@@ -117,21 +143,18 @@ def _pool():
         with _POOL_LOCK:
             if _POOL is None:
                 from psycopg2.pool import ThreadedConnectionPool
-                cfg = get_config()
-                order = [cfg.dsn()] + [d for d in (cfg.pooler_dsn, cfg.direct_dsn)
-                                       if d != cfg.dsn()]
                 last = None
-                for dsn in order:
+                for dsn, sslmode in _dsn_candidates():
                     try:
                         _POOL = ThreadedConnectionPool(
                             POOL_MIN, POOL_MAX, dsn,
-                            connect_timeout=20, sslmode="require")
+                            connect_timeout=20, sslmode=sslmode)
                         break
                     except Exception as e:
                         last = e
                 if _POOL is None:
                     raise ConnectionError(
-                        f"Could not reach Supabase. Last error: "
+                        f"Could not reach the database. Last error: "
                         f"{type(last).__name__}: {last}") from last
     return _POOL
 
@@ -140,24 +163,30 @@ def _pool():
 def pooled(commit: bool = True):
     """A pooled connection. Broken connections are discarded, not returned."""
     pool = _pool()
-    conn = pool.getconn()
-    bad = False
+    if not _SLOTS.acquire(timeout=POOL_WAIT_S):
+        raise TimeoutError(f"no database connection free after {POOL_WAIT_S:g}s "
+                           f"(UT_DB_POOL_MAX={POOL_MAX})")
     try:
-        yield conn
-        if commit:
-            conn.commit()
-    except Exception:
-        bad = True
+        conn = pool.getconn()
+        bad = False
         try:
-            conn.rollback()
+            yield conn
+            if commit:
+                conn.commit()
         except Exception:
-            pass
-        raise
+            bad = True
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                pool.putconn(conn, close=bad)
+            except Exception:
+                pass
     finally:
-        try:
-            pool.putconn(conn, close=bad)
-        except Exception:
-            pass
+        _SLOTS.release()
 
 
 def close_pool() -> None:
@@ -178,16 +207,23 @@ def cursor(commit: bool = True):
             yield cur
 
 
+def _redacted_target() -> str:
+    url = database_url()
+    if url:
+        p = up.urlparse(url)
+        return f"{p.scheme}://{p.hostname}:{p.port or 5432}{p.path}"
+    return get_config().redacted()
+
+
 def ping() -> dict:
     """Connectivity + server info, for the notebook's status cell."""
-    cfg = get_config()
     with cursor(commit=False) as cur:
         cur.execute("select version(), current_database(), current_user, now()")
         v, db, user, now = cur.fetchone()
         cur.execute("select count(*) from information_schema.tables "
                     "where table_schema='public'")
         n_tables = cur.fetchone()[0]
-    return {"connected": True, "dsn": cfg.redacted(), "server": v.split(",")[0],
+    return {"connected": True, "dsn": _redacted_target(), "server": v.split(",")[0],
             "database": db, "user": user, "server_time": str(now),
             "public_tables": n_tables}
 

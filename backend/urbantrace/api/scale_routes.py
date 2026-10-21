@@ -10,13 +10,17 @@ history the database holds.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from ..scale import analytics
+from ..scale.capture import redact_url
 from ..scale.alerts import recent_alerts
 from ..scale.config import SCALE
 from ..scale.registry import REGISTRY
-from ..scale.service import SERVICE, load_cameras_from_db, save_cameras_to_db
+from ..scale.service import SERVICE, load_cameras_from_db
 
 router = APIRouter(prefix="/api/network", tags=["City network"])
 
@@ -27,26 +31,150 @@ def network_summary(hours: float = Query(1.0, gt=0, le=720)):
     return analytics.network_summary(hours)
 
 
+class CameraIn(BaseModel):
+    camera_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.\-]+$")
+    name: str = Field(min_length=1, max_length=200)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    road: str = ""
+    sector: str = ""
+    direction: str = "UNKNOWN"
+    source: str = ""          # rtsp://, http(s)://, file path, or empty for push-only
+    enabled: bool = True
+
+
+def _public(row: dict) -> dict:
+    """A camera row safe to return: stream credentials never leave the server."""
+    out = dict(row)
+    if out.get("source"):
+        out["source"] = redact_url(out["source"])
+    return out
+
+
+def _upsert_cameras(cams: list[CameraIn]) -> int:
+    from psycopg2.extras import execute_values
+
+    from ..db.client import cursor
+    rows = [(c.camera_id, SCALE.site_id, c.name, c.road, c.sector, c.latitude,
+             c.longitude, c.direction, c.source, c.enabled) for c in cams]
+    with cursor() as cur:
+        execute_values(cur, """
+            insert into net_cameras
+              (camera_id, site_id, name, road, sector, latitude, longitude,
+               direction, source, enabled)
+            values %s
+            on conflict (camera_id) do update set
+              name=excluded.name, road=excluded.road, sector=excluded.sector,
+              latitude=excluded.latitude, longitude=excluded.longitude,
+              direction=excluded.direction, source=excluded.source,
+              enabled=excluded.enabled, updated_at=now()
+        """, rows)
+    return len(rows)
+
+
 @router.get("/cameras")
 def cameras():
-    """The camera estate, with its graph statistics."""
-    return {
-        "registry": REGISTRY.summary(),
-        "cameras": [c.to_dict() for c in REGISTRY],
-    }
+    """The camera estate as stored in the database, credentials redacted."""
+    from ..db import repository as repo
+    rows = repo._fetch("""select camera_id, name, road, sector, latitude, longitude,
+                                 direction, source, enabled, updated_at
+                          from net_cameras order by camera_id""")
+    return {"registry": REGISTRY.summary(), "cameras": [_public(r) for r in rows]}
 
 
-@router.post("/cameras/reload")
-def cameras_reload():
-    """Re-read the camera estate from the database into the live registry."""
-    n = load_cameras_from_db()
-    return {"loaded": n, "registry": REGISTRY.summary()}
+@router.post("/cameras", status_code=201)
+def camera_upsert(cam: CameraIn):
+    """Add a camera, or update it if the id exists. Workers pick it up within
+    one refresh interval and a rebalance assigns it to a worker."""
+    return {"saved": _upsert_cameras([cam]), "camera_id": cam.camera_id}
 
 
-@router.post("/cameras/persist")
-def cameras_persist():
-    """Write the in-memory registry and its edges back to the database."""
-    return {"saved": save_cameras_to_db(), "registry": REGISTRY.summary()}
+@router.post("/cameras/bulk", status_code=201)
+def camera_bulk(cams: list[CameraIn]):
+    """Add or update many cameras in one transaction."""
+    if not cams:
+        raise HTTPException(422, "No cameras supplied.")
+    if len(cams) > 5000:
+        raise HTTPException(413, "At most 5000 cameras per request.")
+    return {"saved": _upsert_cameras(cams)}
+
+
+@router.delete("/cameras/{camera_id}")
+def camera_delete(camera_id: str):
+    from ..db.client import cursor
+    with cursor() as cur:
+        cur.execute("delete from net_cameras where camera_id = %s", (camera_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, f"Unknown camera {camera_id}")
+        cur.execute("delete from net_camera_health where camera_id = %s", (camera_id,))
+    return {"deleted": camera_id}
+
+
+@router.patch("/cameras/{camera_id}/enabled")
+def camera_enable(camera_id: str, enabled: bool):
+    from ..db.client import cursor
+    with cursor() as cur:
+        cur.execute("update net_cameras set enabled = %s, updated_at = now() "
+                    "where camera_id = %s", (enabled, camera_id))
+        if cur.rowcount == 0:
+            raise HTTPException(404, f"Unknown camera {camera_id}")
+    return {"camera_id": camera_id, "enabled": enabled}
+
+
+@router.get("/workers")
+def workers():
+    """Live ingest workers and how the estate is spread across them."""
+    from ..db import repository as repo
+    rows = repo._fetch("""
+        select worker_id, host, started_at, heartbeat_at, stats,
+               extract(epoch from (now() - heartbeat_at)) as age_s
+        from net_workers order by worker_id""")
+    for r in rows:
+        r["alive"] = r["age_s"] is not None and r["age_s"] <= SCALE.worker_ttl_s
+        r["age_s"] = round(float(r["age_s"]), 1) if r["age_s"] is not None else None
+    return rows
+
+
+@router.get("/feeds")
+def feeds(state: Optional[str] = None):
+    """Per-camera feed health. A feed whose worker has stopped reporting is
+    shown as `unmonitored` rather than trusted at its last known state."""
+    from ..db import repository as repo
+    rows = repo._fetch("""
+        select c.camera_id, c.name, c.sector, c.enabled, c.source,
+               h.worker_id, h.state, h.source_fps, h.resolution, h.frames_read,
+               h.frames_submitted, h.frames_skipped_static, h.reconnects,
+               h.last_frame_at, h.last_error,
+               extract(epoch from (now() - h.updated_at)) as report_age_s
+        from net_cameras c left join net_camera_health h using (camera_id)
+        order by c.camera_id""")
+    out = []
+    stale = SCALE.worker_ttl_s * 2
+    for r in rows:
+        r = _public(r)
+        age = r.pop("report_age_s")
+        if not r["enabled"]:
+            r["state"] = "disabled"
+        elif not r["source"]:
+            r["state"] = "push-only"
+        elif r["state"] is None or age is None or age > stale:
+            r["state"] = "unmonitored"
+        if state and r["state"] != state:
+            continue
+        out.append(r)
+    return out
+
+
+@router.get("/fleet")
+def fleet():
+    """One-call summary for the operations screen."""
+    ws = workers()
+    fs = feeds()
+    by_state: dict = {}
+    for f in fs:
+        by_state[f["state"]] = by_state.get(f["state"], 0) + 1
+    return {"workers_alive": sum(1 for w in ws if w["alive"]), "workers": len(ws),
+            "cameras": len(fs), "feeds_by_state": by_state}
 
 
 @router.get("/cameras/near")
@@ -151,8 +279,8 @@ def watchlist():
 
 @router.get("/status")
 def status():
-    """Live ingest health: throughput, queue depth, drops, sink lag."""
-    return SERVICE.stats()
+    """Fleet health: live workers and the state of every feed."""
+    return fleet()
 
 
 @router.get("/config")
@@ -160,15 +288,3 @@ def config():
     """The tunables this process is running with."""
     from dataclasses import asdict
     return asdict(SCALE)
-
-
-@router.post("/housekeeping")
-def housekeeping():
-    """Evict expired identities and idle tracker state."""
-    return SERVICE.housekeeping()
-
-
-@router.post("/flush")
-def flush():
-    """Force a persistence flush. Normally happens on a timer."""
-    return SERVICE.flush()
