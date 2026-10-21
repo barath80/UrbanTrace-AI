@@ -36,6 +36,7 @@ pipeline stops rather than fabricating output.
 - [Production deployment](#production-deployment-100-live-cameras)
 - [Honest limitations](#honest-limitations)
 - [Security](#security)
+- [Technical documentation](#technical-documentation)
 
 ---
 
@@ -181,7 +182,7 @@ video → vehicle detect → MOT → plate detect → crop → preprocess → OC
 | Multi-object tracking | ByteTrack, persistent IDs, state reset per camera |
 | Plate detection | Local YOLOv11 on GPU **or** your Roboflow model (auto-selected) |
 | Preprocessing | Deskew (Hough), CLAHE, unsharp mask, bilateral denoise, Otsu |
-| OCR | `cct-s-v2-global-model` (CCT transformer) via ONNX Runtime on GPU |
+| OCR | `cct-xs-v2-global-model` (CCT transformer) via ONNX Runtime on GPU |
 | Cross-variant consensus | Variants vote; agreement tempers confidence |
 | Temporal aggregation | String vote + per-character vote + peak-evidence blend |
 | Format validation | Indian plate grammar, state-code check, position-forced repair |
@@ -980,12 +981,13 @@ figures. Plan workers from `frames/s per worker` in the Fleet tab, not from a gu
 These are real and stated deliberately — each would otherwise surface as a question
 you could not answer.
 
-**OCR accuracy is not yet measured.** The plate in the test footage was recognised
-correctly at 0.943 confidence, but that is a sample size of one. A defensible
-accuracy figure needs a few hundred human-verified plate crops. The available
-detection dataset contains plate *boxes* only, no plate *text*. Robustness under
-degradation **is** measured; absolute accuracy is not. **Do not quote a >90%
-accuracy figure until it has been measured on held-out labelled data.**
+**OCR accuracy is measured, and it is modest.** On 80 hand-transcribed held-out
+plates (9 illegible ones excluded) single-frame OCR is **71.3 % exact-match** and
+**92.2 % character accuracy**; end to end with the plate detector it is **72.5 %**.
+The dominant failure is a dropped trailing character. Do not quote a >90 % plate
+accuracy figure. Multi-frame voting demonstrably changes answers but its accuracy has
+not been scored (no video with plate ground truth). Full numbers and caveats:
+[docs/03-models-and-accuracy.md](docs/03-models-and-accuracy.md).
 
 **Vehicle class labels are wrong for autorickshaws.** The vehicle detector is
 `yolo11m` on COCO, and COCO has no autorickshaw class. On this Chennai footage
@@ -1044,7 +1046,23 @@ faster and free; hosted inference costs one API call per frame.
 | OCR | CCT transformer via ONNX Runtime (CUDA) |
 | CV | OpenCV, NumPy |
 | Backend | FastAPI, Uvicorn |
-| Database | Supabase / PostgreSQL 17 + PostGIS |
-| Frontend | Vanilla JS, Leaflet, leaflet.heat |
+| Database | PostgreSQL + PostGIS (Supabase in development, `postgis/postgis:16` container in production) |
+| Frontend | React + TypeScript + Vite, Leaflet (legacy vanilla-JS dashboard kept at `/legacy`) |
 | Notebook | Jupyter, pandas, matplotlib, folium |
 | Video | imageio-ffmpeg (H.264 transcode) |
+
+---
+
+## Technical documentation
+
+In-depth design documents live in [docs/](docs/README.md):
+
+1. [Solution, innovation and novelty](docs/01-solution-and-novelty.md)
+2. [Technology choices — why this, why not the others](docs/02-technology-choices.md)
+3. [Models and measured accuracy](docs/03-models-and-accuracy.md)
+4. [Tracking and identity resolution](docs/04-tracking-and-identity.md)
+5. [Database design (DBMS)](docs/05-database-dbms.md)
+6. [Networking and load balancing](docs/06-networking-and-load-balancing.md)
+7. [Concurrency and thread safety](docs/07-concurrency-and-thread-safety.md)
+8. [Security](docs/08-security.md)
+9. [Verification, defects found, and limitations](docs/09-verification-and-limitations.md)
